@@ -124,10 +124,10 @@ fi
 
 if [ "$SPARK_YARN" == "true" ]; then
   if [[ "$SPARK_HADOOP_VERSION" =~ "0.23." ]]; then
-    mvn clean package -DskipTests -Pyarn-alpha -Dhadoop.version=$SPARK_HADOOP_VERSION \
+    mvn package -DskipTests -Pyarn-alpha -Dhadoop.version=$SPARK_HADOOP_VERSION \
       -Dyarn.version=$SPARK_HADOOP_VERSION $MAYBE_HIVE -Phadoop-0.23
   else
-    mvn clean package -DskipTests -Pyarn -Dhadoop.version=$SPARK_HADOOP_VERSION \
+    mvn package -DskipTests -Pyarn -Dhadoop.version=$SPARK_HADOOP_VERSION \
       -Dyarn.version=$SPARK_HADOOP_VERSION $MAYBE_HIVE
   fi
 else
@@ -140,15 +140,23 @@ fi
 
 # Make directories
 rm -rf "$DISTDIR"
-mkdir -p "$DISTDIR"
+mkdir -p "$DISTDIR/lib"
 echo "Spark $VERSION built for Hadoop $SPARK_HADOOP_VERSION" > "$DISTDIR/RELEASE"
 
 # Copy jars
-cp -r  $FWDIR/assembly/target/*spark-dist/* "$DISTDIR/"
-cp -r  $FWDIR/examples/target/*spark-examples-dist/* "$DISTDIR/"
-if [ "$SPARK_HIVE" == "true" ]; then
-  cp -r  $FWDIR/sql/hive/target/*spark-hive-dist/* "$DISTDIR/"
-fi
+cp $FWDIR/assembly/target/*assembly*.jar "$DISTDIR/lib/"
+cp $FWDIR/examples/target/spark-examples*.jar "$DISTDIR/lib/"
+cp -r $FWDIR/assembly/target/dependency "$DISTDIR/lib/"
+cp -r $FWDIR/examples/target/dependency "$DISTDIR/lib/"
+
+# Copy other things
+mkdir "$DISTDIR"/conf
+cp "$FWDIR"/conf/*.template "$DISTDIR"/conf
+cp "$FWDIR"/conf/slaves "$DISTDIR"/conf
+cp -r "$FWDIR/bin" "$DISTDIR"
+cp -r "$FWDIR/python" "$DISTDIR"
+cp -r "$FWDIR/sbin" "$DISTDIR"
+
 
 # Download and copy in tachyon, if requested
 if [ "$SPARK_TACHYON" == "true" ]; then

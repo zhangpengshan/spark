@@ -110,7 +110,7 @@ export JAVA_OPTS
 
 if [ ! -f "$FWDIR/RELEASE" ]; then
   # Exit if the user hasn't compiled Spark
-  if [ ! -d "$FWDIR"/assembly/target/*spark-dist/ ]; then
+  if [ ! -f "$FWDIR"/assembly/target/spark-assembly*.jar ]; then
     num_jars=$(ls "$FWDIR"/assembly/target/scala-$SCALA_VERSION/ | grep "spark-assembly.*hadoop.*.jar" | wc -l)
     jars_list=$(ls "$FWDIR"/assembly/target/scala-$SCALA_VERSION/ | grep "spark-assembly.*hadoop.*.jar")
     if [ "$num_jars" -eq "0" ]; then
