@@ -1106,9 +1106,10 @@ abstract class RDD[T: ClassTag](
    *  all references to its parent RDDs will be removed.
    */
   def cachePoint(level: StorageLevel): this.type = {
+    val rdd = this
     val func = (ctx: TaskContext, iterator: Iterator[T]) => {
       try {
-        val key = RDDBlockId(this.id, ctx.partitionId)
+        val key = RDDBlockId(rdd.id, ctx.partitionId)
         SparkEnv.get.blockManager.put(key, iterator, level, tellMaster = true)
         true
       }
