@@ -40,7 +40,7 @@ import org.apache.spark.partial.BoundedDouble
 import org.apache.spark.partial.CountEvaluator
 import org.apache.spark.partial.GroupedCountEvaluator
 import org.apache.spark.partial.PartialResult
-import org.apache.spark.storage.StorageLevel
+import org.apache.spark.storage.{RDDBlockId, StorageLevel}
 import org.apache.spark.util.{BoundedPriorityQueue, SerializableHyperLogLog, Utils}
 import org.apache.spark.util.collection.OpenHashMap
 import org.apache.spark.util.random.{BernoulliSampler, PoissonSampler}
@@ -1095,6 +1095,34 @@ abstract class RDD[T: ClassTag](
   /** A private method for tests, to look at the contents of each partition */
   private[spark] def collectPartitions(): Array[Array[T]] = {
     sc.runJob(this, (iter: Iterator[T]) => iter.toArray)
+  }
+
+  /** Persist this RDD with the default storage level (`MEMORY_ONLY`) and
+   *  all references to its parent RDDs will be removed.
+   */
+  def cachePoint(): this.type = cachePoint(StorageLevel.MEMORY_ONLY)
+
+  /** Persist this RDD with the storage level (`level`) and
+   *  all references to its parent RDDs will be removed.
+   */
+  def cachePoint(level: StorageLevel): this.type = {
+    val func = (ctx: TaskContext, iterator: Iterator[T]) => {
+      try {
+        val key = RDDBlockId(this.id, ctx.partitionId)
+        SparkEnv.get.blockManager.put(key, iterator, level, tellMaster = true)
+        true
+      }
+      catch {
+        case t: Throwable =>
+          false
+      }
+    }
+    val results = new Array[Boolean](partitions.size)
+    sc.runJob(this, func, (index: Int, res: Boolean) => results(index) = res)
+    if (results.forall(t => t)) {
+      clearDependencies()
+    }
+    this.persist(level)
   }
 
   /**
