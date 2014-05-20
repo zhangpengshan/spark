@@ -1108,15 +1108,9 @@ abstract class RDD[T: ClassTag](
   def cachePoint(level: StorageLevel): this.type = {
     val rdd = this
     val func = (ctx: TaskContext, iterator: Iterator[T]) => {
-      try {
-        val key = RDDBlockId(rdd.id, ctx.partitionId)
-        SparkEnv.get.blockManager.put(key, iterator, level, tellMaster = true)
-        true
-      }
-      catch {
-        case t: Throwable =>
-          false
-      }
+      val key = RDDBlockId(rdd.id, ctx.partitionId)
+      SparkEnv.get.blockManager.put(key, iterator, level, tellMaster = true)
+      true
     }
     val results = new Array[Boolean](partitions.size)
     sc.runJob(this, func, (index: Int, res: Boolean) => results(index) = res)
