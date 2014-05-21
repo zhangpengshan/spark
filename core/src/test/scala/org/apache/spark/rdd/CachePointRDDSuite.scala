@@ -27,18 +27,24 @@ class CachePointRDDSuite extends FunSuite with LocalSparkContext {
 
   test("local SparkContext") {
     sc = new SparkContext("local", "test")
-    val rdd = sc.parallelize(Seq(1, 2, 3, 4))
+    val rdd = sc.parallelize(Seq(1, 2, 3, 4)).map(t => s"$t")
+    assert(rdd.dependencies.size === 1)
     val cachePointRDD = rdd.cachePoint()
     assert(cachePointRDD.dependencies.size === 0)
-    assert(cachePointRDD.collect() === rdd.collect())
+    assert(cachePointRDD.collect() === Array("1", "2", "3", "4"))
   }
 
   test("local cluster SparkContext") {
     sc = new SparkContext("local-cluster[1 , 1 , 512]", "test")
-    val rdd = sc.parallelize(Seq(1, 2, 3, 4))
+    val rdd = sc.parallelize(Seq(1, 2, 3, 4)).filter(t => t > 2)
+    assert(rdd.dependencies.size === 1)
     val cachePointRDD = rdd.cachePoint(StorageLevel.DISK_ONLY)
     assert(cachePointRDD.dependencies.size === 0)
-    assert(cachePointRDD.collect() === rdd.collect())
+    assert(cachePointRDD.collect() === Array(3, 4))
+    intercept[SparkException] {
+      sc.parallelize(Seq(1, 2, 3, 4)).filter(t => t > 1).
+        cachePoint(StorageLevel.NONE)
+    }
   }
 
 }

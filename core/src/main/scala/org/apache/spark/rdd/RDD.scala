@@ -1116,6 +1116,7 @@ abstract class RDD[T: ClassTag](
     sc.runJob(this, func, (index: Int, res: Boolean) => results(index) = res)
     if (results.forall(t => t)) {
       clearDependencies()
+      deps = Nil
     }
     this.persist(level)
   }
