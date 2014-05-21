@@ -352,8 +352,8 @@ abstract class RDD[T: ClassTag](
   /**
    * Return a sampled subset of this RDD.
    */
-  def sample(withReplacement: Boolean, 
-      fraction: Double, 
+  def sample(withReplacement: Boolean,
+      fraction: Double,
       seed: Long = Utils.random.nextLong): RDD[T] = {
     require(fraction >= 0.0, "Invalid fraction value: " + fraction)
     if (withReplacement) {
@@ -1112,11 +1112,18 @@ abstract class RDD[T: ClassTag](
       SparkEnv.get.blockManager.put(key, iterator, level, tellMaster = true)
       true
     }
-    val results = new Array[Boolean](partitions.size)
+    val partitionSize = partitions.size
+    val results = new Array[Boolean](partitionSize)
     sc.runJob(this, func, (index: Int, res: Boolean) => results(index) = res)
-    if (results.forall(t => t)) {
+    def clearReferences() {
       clearDependencies()
+      partitions_ = Array.tabulate(partitionSize) { i =>
+        new CachePointPartition(i)
+      }
       deps = Nil
+    }
+    if (results.forall(t => t)) {
+      clearReferences
     }
     this.persist(level)
   }

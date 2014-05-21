@@ -31,6 +31,7 @@ class CachePointRDDSuite extends FunSuite with LocalSparkContext {
     assert(rdd.dependencies.size === 1)
     val cachePointRDD = rdd.cachePoint()
     assert(cachePointRDD.dependencies.size === 0)
+    assert(cachePointRDD.partitions.head.isInstanceOf[CachePointPartition])
     assert(cachePointRDD.collect() === Array("1", "2", "3", "4"))
   }
 
