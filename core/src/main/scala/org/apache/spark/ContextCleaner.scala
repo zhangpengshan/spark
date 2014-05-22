@@ -22,7 +22,7 @@ import java.lang.ref.{ReferenceQueue, WeakReference}
 import scala.collection.mutable.{ArrayBuffer, SynchronizedBuffer}
 
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{RDDCheckpointData, RDD}
 import org.apache.spark.util.Utils
 
 /**
@@ -32,6 +32,7 @@ private sealed trait CleanupTask
 private case class CleanRDD(rddId: Int) extends CleanupTask
 private case class CleanShuffle(shuffleId: Int) extends CleanupTask
 private case class CleanBroadcast(broadcastId: Long) extends CleanupTask
+private case class CleanRDDCheckpointData(rddId: Int) extends CleanupTask
 
 /**
  * A WeakReference associated with a CleanupTask.
@@ -105,6 +106,11 @@ private[spark] class ContextCleaner(sc: SparkContext) extends Logging {
     registerForCleanup(broadcast, CleanBroadcast(broadcast.id))
   }
 
+  /** Register a RDDCheckpointData for cleanup when it is garbage collected. */
+  def registerRDDCheckpointDataForCleanup[T](checkpointData: RDDCheckpointData[T]) {
+    registerForCleanup(checkpointData, CleanRDDCheckpointData(checkpointData.rdd.id))
+  }
+
   /** Register an object for cleanup. */
   private def registerForCleanup(objectForCleanup: AnyRef, task: CleanupTask) {
     referenceBuffer += new CleanupTaskWeakReference(task, objectForCleanup, referenceQueue)
@@ -126,6 +132,8 @@ private[spark] class ContextCleaner(sc: SparkContext) extends Logging {
               doCleanupShuffle(shuffleId, blocking = blockOnCleanupTasks)
             case CleanBroadcast(broadcastId) =>
               doCleanupBroadcast(broadcastId, blocking = blockOnCleanupTasks)
+            case CleanRDDCheckpointData(rddId) =>
+              doCleanRDDCheckpointData(rddId, blocking = blockOnCleanupTasks)
           }
         }
       } catch {
@@ -168,6 +176,17 @@ private[spark] class ContextCleaner(sc: SparkContext) extends Logging {
       logInfo("Cleaned broadcast " + broadcastId)
     } catch {
       case e: Exception => logError("Error cleaning broadcast " + broadcastId, e)
+    }
+  }
+
+  def doCleanRDDCheckpointData(rddId: Int, blocking: Boolean) {
+    try {
+      logDebug("Cleaning rdd checkpoint data " + rddId)
+      RDDCheckpointData.clearRDDCheckpointData(sc,rddId, blocking)
+      logInfo("Cleaned rdd checkpoint data " + rddId)
+    }
+    catch {
+      case e: Exception => logError("Error cleaning rdd checkpoint data " + rddId, e)
     }
   }
 
