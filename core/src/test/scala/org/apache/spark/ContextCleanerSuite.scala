@@ -195,7 +195,7 @@ class ContextCleanerSuite extends FunSuite with BeforeAndAfter with LocalSparkCo
     postGCTester.assertCleanup()
   }
 
-  test("automatically cleanup checkpoint date") {
+  test("automatically cleanup checkpoint data") {
     val conf=new SparkConf().setMaster("local[2]").setAppName("cleanupCheckpointData").
       set("spark.cleaner.checkpointData.enabled","true")
     sc =new SparkContext(conf)
