@@ -196,6 +196,9 @@ class ContextCleanerSuite extends FunSuite with BeforeAndAfter with LocalSparkCo
   }
 
   test("automatically cleanup checkpoint date") {
+    val conf=new SparkConf().setMaster("local[2]").setAppName("cleanupCheckpointData").
+      set("spark.cleaner.checkpointData.enabled","true")
+    sc =new SparkContext(conf)
     val checkpointDir = java.io.File.createTempFile("temp", "")
     checkpointDir.deleteOnExit()
     checkpointDir.delete()
