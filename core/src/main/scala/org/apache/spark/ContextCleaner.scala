@@ -107,8 +107,8 @@ private[spark] class ContextCleaner(sc: SparkContext) extends Logging {
   }
 
   /** Register a RDDCheckpointData for cleanup when it is garbage collected. */
-  def registerRDDCheckpointDataForCleanup[T](checkpointData: RDDCheckpointData[T]) {
-    registerForCleanup(checkpointData, CleanRDDCheckpointData(checkpointData.rdd.id))
+  def registerRDDCheckpointDataForCleanup[T](rdd: RDD[_], parentId: Int) {
+    registerForCleanup(rdd, CleanRDDCheckpointData(parentId))
   }
 
   /** Register an object for cleanup. */

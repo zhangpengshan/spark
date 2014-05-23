@@ -92,9 +92,9 @@ private[spark] class RDDCheckpointData[T: ClassTag](@transient val rdd: RDD[T])
     // Save to file, and reload it as an RDD
     val broadcastedConf = rdd.context.broadcast(
       new SerializableWritable(rdd.context.hadoopConfiguration))
-    rdd.context.cleaner.foreach(cleaner => cleaner.registerRDDCheckpointDataForCleanup(this))
-    rdd.context.runJob(rdd, CheckpointRDD.writeToFile[T](path.toString, broadcastedConf) _)
     val newRDD = new CheckpointRDD[T](rdd.context, path.toString)
+    rdd.context.cleaner.foreach(cleaner => cleaner.registerRDDCheckpointDataForCleanup(newRDD, rdd.id))
+    rdd.context.runJob(rdd, CheckpointRDD.writeToFile[T](path.toString, broadcastedConf) _)
     if (newRDD.partitions.size != rdd.partitions.size) {
       throw new SparkException(
         "Checkpoint RDD " + newRDD + "(" + newRDD.partitions.size + ") has different " +
