@@ -212,7 +212,7 @@ class ALS private (
         // perform ALS update
         logInfo("Re-computing I given U (Iteration %d/%d)".format(iter, iterations))
         // Persist users because it will be called twice.
-        if (sc.checkpointDir.isDefined && iter % 3 == 0) {
+        if (sc.checkpointDir.isDefined && (iter % 3 == 1)) {
           users.checkpoint()
         }
         users.persist()
@@ -222,7 +222,7 @@ class ALS private (
           alpha, YtY)
         previousProducts.unpersist()
         logInfo("Re-computing U given I (Iteration %d/%d)".format(iter, iterations))
-        if (sc.checkpointDir.isDefined && iter % 3 == 0) {
+        if (sc.checkpointDir.isDefined && (iter % 3 == 1)) {
           products.checkpoint()
         }
         products.persist()
