@@ -90,6 +90,12 @@ private[yarn] class YarnAllocationHandler(
   // Containers to be released in next request to RM
   private val pendingReleaseContainers = new ConcurrentHashMap[ContainerId, Boolean]
 
+  // TODO: Here we can dynamically calculate the default value.
+  // eg: val memoryOverhead = (executorMemory * 0.25D).ceil.toInt
+  // Additional memory overhead - in mb.
+  private val memoryOverhead = sparkConf.getInt("spark.yarn.container.memoryOverhead",
+    YarnAllocationHandler.MEMORY_OVERHEAD)
+
   // Number of container requests that have been sent to, but not yet allocated by the
   // ApplicationMaster.
   private val numPendingAllocate = new AtomicInteger()
@@ -106,7 +112,7 @@ private[yarn] class YarnAllocationHandler(
   def getNumExecutorsFailed: Int = numExecutorsFailed.intValue
 
   def isResourceConstraintSatisfied(container: Container): Boolean = {
-    container.getResource.getMemory >= (executorMemory + YarnAllocationHandler.MEMORY_OVERHEAD)
+    container.getResource.getMemory >= (executorMemory + memoryOverhead)
   }
 
   def releaseContainer(container: Container) {
@@ -248,7 +254,7 @@ private[yarn] class YarnAllocationHandler(
         val executorHostname = container.getNodeId.getHost
         val containerId = container.getId
 
-        val executorMemoryOverhead = (executorMemory + YarnAllocationHandler.MEMORY_OVERHEAD)
+        val executorMemoryOverhead = (executorMemory + memoryOverhead)
         assert(container.getResource.getMemory >= executorMemoryOverhead)
 
         if (numExecutorsRunningNow > maxExecutors) {
@@ -477,7 +483,7 @@ private[yarn] class YarnAllocationHandler(
       numPendingAllocate.addAndGet(numExecutors)
       logInfo("Will Allocate %d executor containers, each with %d memory".format(
         numExecutors,
-        (executorMemory + YarnAllocationHandler.MEMORY_OVERHEAD)))
+        (executorMemory + memoryOverhead)))
     } else {
       logDebug("Empty allocation request ...")
     }
@@ -537,7 +543,7 @@ private[yarn] class YarnAllocationHandler(
       priority: Int
     ): ArrayBuffer[ContainerRequest] = {
 
-    val memoryRequest = executorMemory + YarnAllocationHandler.MEMORY_OVERHEAD
+    val memoryRequest = executorMemory + memoryOverhead
     val resource = Resource.newInstance(memoryRequest, executorCores)
 
     val prioritySetting = Records.newRecord(classOf[Priority])
