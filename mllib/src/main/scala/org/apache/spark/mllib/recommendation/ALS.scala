@@ -223,7 +223,7 @@ class ALS private (
         previousProducts.unpersist()
         logInfo("Re-computing U given I (Iteration %d/%d)".format(iter, iterations))
         if (sc.checkpointDir.isDefined && (iter % 3 == 1)) {
-          users.checkpoint()
+          products.checkpoint()
         }
         products.persist()
         val XtX = Some(sc.broadcast(computeYtY(products)))
