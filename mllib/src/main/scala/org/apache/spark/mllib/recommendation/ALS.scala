@@ -211,7 +211,7 @@ class ALS private (
       for (iter <- 1 to iterations) {
         // perform ALS update
         logInfo("Re-computing I given U (Iteration %d/%d)".format(iter, iterations))
-        // All references to users parent RDDs will be removed,
+        // All references to it's parent RDDs will be removed,
         // so that be cleaned in sc.cleaner
         if (sc.checkpointDir.isDefined && (iter % 3 == 1)) {
           users.checkpoint()
