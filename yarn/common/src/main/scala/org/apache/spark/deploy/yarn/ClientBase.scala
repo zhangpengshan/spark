@@ -235,7 +235,7 @@ trait ClientBase extends Logging {
     def getArg(arg: String, envVar: String, sysProp: String): String = {
       if (arg != null && !arg.isEmpty) {
         arg
-      } else if (System.getenv(envVar) =! null && !System.getenv(envVar).isEmpty) {
+      } else if (System.getenv(envVar) != null && !System.getenv(envVar).isEmpty) {
         System.getenv(envVar)
       } else {
         sparkConf.getOption(sysProp).orNull
