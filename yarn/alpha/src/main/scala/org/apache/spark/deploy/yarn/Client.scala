@@ -66,10 +66,6 @@ class Client(clientArgs: ClientArguments, hadoopConf: Configuration, spConf: Spa
     val appContext = createApplicationSubmissionContext(appId)
     val appStagingDir = getAppStagingDir(appId)
     val localResources = prepareLocalResources(appStagingDir)
-    logInfo(s"witgo${localResources.size}")
-    localResources.foreach { case (link, localResource) =>
-      logInfo(s"witgo: $link => ${localResource.getResource}")
-    }
     val env = setupLaunchEnv(localResources, appStagingDir)
     val amContainer = createContainerLaunchContext(newApp, localResources, env)
 
