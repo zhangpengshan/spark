@@ -142,11 +142,11 @@ class JavaStreamingContext(val ssc: StreamingContext) extends Lifecycle {
    */
   def this(path: String, hadoopConf: Configuration) = this(new StreamingContext(path, hadoopConf))
 
-  @deprecated("use sparkContext", "0.9.0")
-  val sc: JavaSparkContext = sparkContext
-
   /** The underlying SparkContext */
   val sparkContext = new JavaSparkContext(ssc.sc)
+
+  @deprecated("use sparkContext", "0.9.0")
+  val sc: JavaSparkContext = sparkContext
 
   override def conf = sparkContext.conf
 
