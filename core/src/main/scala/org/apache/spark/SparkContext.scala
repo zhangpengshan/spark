@@ -254,6 +254,12 @@ class SparkContext(config: SparkConf) extends Logging {
     } else None
   }
 
+  private[spark] val taskEvent: TaskEventListener = {
+    val taskEventListener = new TaskEventListener(appName, conf)
+    listenerBus.addListener(taskEventListener)
+    taskEventListener
+  }
+
   // At this point, all relevant SparkListeners have been registered, so begin releasing events
   listenerBus.start()
 
