@@ -16,7 +16,8 @@
  */
 package org.apache.spark.scheduler
 
-import org.apache.spark.{ContextCleaner, Logging, SparkConf}
+import java.io.IOException
+import org.apache.spark.{ExceptionFailure, ContextCleaner, Logging, SparkConf}
 
 private[spark] class TaskEventListener(appName: String, sparkConf: SparkConf)
   extends SparkListener with Logging {
@@ -24,13 +25,19 @@ private[spark] class TaskEventListener(appName: String, sparkConf: SparkConf)
   val MAX_PROPORTION = 0.7D
 
   override def onTaskEnd(taskEnd: SparkListenerTaskEnd) {
-    val taskMetrics = taskEnd.taskMetrics
-    val taskInfo = taskEnd.taskInfo
-    val gcProportion = taskMetrics.jvmGCTime.toDouble / taskMetrics.executorRunTime
-    if (gcProportion > MAX_PROPORTION) {
-      logInfo("task %s:%d on %s gc time was %s exceeds the limit %s,run gc.".format(taskInfo.taskId,
-        taskInfo.index, taskInfo.host, (gcProportion * 100).toInt, (MAX_PROPORTION * 100).toInt))
-      ContextCleaner.runGC()
+    val SparkListenerTaskEnd(stageId, taskType, reason, taskInfo, taskMetrics) = taskEnd
+    if (reason.isInstanceOf[ExceptionFailure]) {
+      val ef = reason.asInstanceOf[ExceptionFailure]
+      if ((ef.className == classOf[OutOfMemoryError].getName) || ef.className ==
+        classOf[IOException].getName && ef.description.startsWith("No space left on device")) {
+        ContextCleaner.runGC()
+      }
+    } else if (taskMetrics.jvmGCTime.toDouble / taskMetrics.executorRunTime > MAX_PROPORTION) {
+      // TODO: Such logic is too rough?
+      // logInfo("task %s:%d on %s gc time was %s exceeds the limit %s,run gc.".format(
+      //   taskInfo.taskId, taskInfo.index, taskInfo.host, (gcProportion * 100).toInt,
+      //   (MAX_PROPORTION * 100).toInt))
+      // ContextCleaner.runGC()
     }
   }
 }
