@@ -179,8 +179,25 @@ private[spark] class ContextCleaner(sc: SparkContext) extends Logging {
   // to ensure that more reliable testing.
 }
 
-private object ContextCleaner {
+private[spark] object ContextCleaner extends Logging {
   private val REF_QUEUE_POLL_TIMEOUT = 100
+
+  /** Run garbage collection and make sure it actually has run */
+  def runGC() {
+    import java.lang.ref.WeakReference
+    val weakRef = new WeakReference(new Object())
+    val startTime = System.currentTimeMillis
+    System.gc()
+    System.runFinalization()
+    while (weakRef.get != null) {
+      System.gc()
+      System.runFinalization()
+      Thread.sleep(200)
+      if (System.currentTimeMillis - startTime > 10000) {
+        logError("Automatically garbage collection error!")
+      }
+    }
+  }
 }
 
 /**

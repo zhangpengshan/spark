@@ -16,7 +16,7 @@
  */
 package org.apache.spark.scheduler
 
-import org.apache.spark.{Logging, SparkConf, SparkException}
+import org.apache.spark.{ContextCleaner, Logging, SparkConf}
 
 private[spark] class TaskEventListener(appName: String, sparkConf: SparkConf)
   extends SparkListener with Logging {
@@ -30,24 +30,7 @@ private[spark] class TaskEventListener(appName: String, sparkConf: SparkConf)
     if (gcProportion > MAX_PROPORTION) {
       logInfo("task %s:%d on %s gc time was %s exceeds the limit %s,run gc.".format(taskInfo.taskId,
         taskInfo.index, taskInfo.host, (gcProportion * 100).toInt, (MAX_PROPORTION * 100).toInt))
-      runGC()
-    }
-  }
-
-  /** Run garbage collection and make sure it actually has run */
-  private def runGC() {
-    import java.lang.ref.WeakReference
-    val weakRef = new WeakReference(new Object())
-    val startTime = System.currentTimeMillis
-    System.gc()
-    System.runFinalization()
-    while (weakRef.get != null) {
-      System.gc()
-      System.runFinalization()
-      Thread.sleep(200)
-      if (System.currentTimeMillis - startTime > 10000) {
-        throw new SparkException("Automatically garbage collection error!")
-      }
+      ContextCleaner.runGC()
     }
   }
 }
