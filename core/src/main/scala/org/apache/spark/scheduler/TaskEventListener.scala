@@ -28,6 +28,7 @@ private[spark] class TaskEventListener(appName: String, sparkConf: SparkConf)
     val SparkListenerTaskEnd(stageId, taskType, reason, taskInfo, taskMetrics) = taskEnd
     if (reason.isInstanceOf[ExceptionFailure]) {
       val ef = reason.asInstanceOf[ExceptionFailure]
+      logInfo(ef.className + ":\n" + ef.stackTrace.toErrorString)
       if ((ef.className == classOf[OutOfMemoryError].getName) || ef.className ==
         classOf[IOException].getName && ef.description.startsWith("No space left on device")) {
         ContextCleaner.runGC()
