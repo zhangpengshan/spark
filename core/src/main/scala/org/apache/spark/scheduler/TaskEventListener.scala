@@ -32,7 +32,8 @@ private[spark] class TaskEventListener(appName: String, sparkConf: SparkConf)
         classOf[IOException].getName && ef.description.startsWith("No space left on device")) {
         ContextCleaner.runGC()
       }
-    } else if (taskMetrics.jvmGCTime.toDouble / taskMetrics.executorRunTime > MAX_PROPORTION) {
+    } else if ((taskMetrics != null) && (taskMetrics.jvmGCTime.toDouble /
+      taskMetrics.executorRunTime > MAX_PROPORTION)) {
       // TODO: Such logic is too rough?
       // logInfo("task %s:%d on %s gc time was %s exceeds the limit %s,run gc.".format(
       //   taskInfo.taskId, taskInfo.index, taskInfo.host, (gcProportion * 100).toInt,
