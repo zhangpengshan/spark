@@ -251,6 +251,7 @@ private[spark] class Executor(
           }
           val reason = ExceptionFailure(t.getClass.getName, t.toString, t.getStackTrace, metrics)
           execBackend.statusUpdate(taskId, TaskState.FAILED, ser.serialize(reason))
+          logInfo(reason.toErrorString)
 
           // Don't forcibly exit unless the exception was inherently fatal, to avoid
           // stopping other tasks unnecessarily.
