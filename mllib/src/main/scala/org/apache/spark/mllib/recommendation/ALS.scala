@@ -211,15 +211,23 @@ class ALS private (
       for (iter <- 1 to iterations) {
         // perform ALS update
         logInfo("Re-computing I given U (Iteration %d/%d)".format(iter, iterations))
+        // All references to it's parent RDDs will be removed,
+        // so that be cleaned in sc.cleaner
+        if (sc.checkpointDir.isDefined && (iter % 3 == 1)) {
+          users.checkpoint()
+        }
         // Persist users because it will be called twice.
-        users.persist()
+        users.setName(s"users-$iter").persist()
         val YtY = Some(sc.broadcast(computeYtY(users)))
         val previousProducts = products
         products = updateFeatures(users, userOutLinks, productInLinks, partitioner, rank, lambda,
           alpha, YtY)
         previousProducts.unpersist()
         logInfo("Re-computing U given I (Iteration %d/%d)".format(iter, iterations))
-        products.persist()
+        if (sc.checkpointDir.isDefined && (iter % 3 == 1)) {
+          products.checkpoint()
+        }
+        products.setName(s"products-$iter").persist()
         val XtX = Some(sc.broadcast(computeYtY(products)))
         val previousUsers = users
         users = updateFeatures(products, productOutLinks, userInLinks, partitioner, rank, lambda,

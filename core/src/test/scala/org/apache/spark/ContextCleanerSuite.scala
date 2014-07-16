@@ -30,7 +30,7 @@ import org.scalatest.concurrent.Eventually._
 import org.scalatest.time.SpanSugar._
 
 import org.apache.spark.SparkContext._
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{RDDCheckpointData, RDD}
 import org.apache.spark.storage.{BlockId, BroadcastBlockId, RDDBlockId, ShuffleBlockId}
 
 class ContextCleanerSuite extends FunSuite with BeforeAndAfter with LocalSparkContext {
@@ -193,6 +193,33 @@ class ContextCleanerSuite extends FunSuite with BeforeAndAfter with LocalSparkCo
     rddBuffer.clear()
     runGC()
     postGCTester.assertCleanup()
+  }
+
+  test("automatically cleanup checkpoint data") {
+    val conf=new SparkConf().setMaster("local[2]").setAppName("cleanupCheckpointData").
+      set("spark.cleaner.checkpointData.enabled","true")
+    sc =new SparkContext(conf)
+    val checkpointDir = java.io.File.createTempFile("temp", "")
+    checkpointDir.deleteOnExit()
+    checkpointDir.delete()
+    var rdd = newPairRDD
+    sc.setCheckpointDir(checkpointDir.toString)
+    rdd.checkpoint()
+    rdd.cache()
+    rdd.collect()
+    val rddId = rdd.id
+    RDDCheckpointData.rddCheckpointDataPath(sc, rddId).foreach { path =>
+      val fs = path.getFileSystem(sc.hadoopConfiguration)
+      assert(fs.exists(path))
+    }
+    val postGCTester = new CleanerTester(sc, Seq(rddId), Nil, Nil)
+    rdd = null
+    runGC()
+    postGCTester.assertCleanup()
+    RDDCheckpointData.rddCheckpointDataPath(sc, rddId).foreach { path =>
+      val fs = path.getFileSystem(sc.hadoopConfiguration)
+      assert(!fs.exists(path))
+    }
   }
 
   //------ Helper functions ------
