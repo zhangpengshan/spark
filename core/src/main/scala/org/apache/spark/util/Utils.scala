@@ -51,7 +51,7 @@ private[spark] case class CallSite(short: String, long: String)
  */
 private[spark] object Utils extends Logging {
   val random = new Random()
-
+  private var hook: Thread = null
   def sparkBin(sparkHome: String, which: String): File = {
     val suffix = if (isWindows) ".cmd" else ""
     new File(sparkHome + File.separator + "bin", which + suffix)
@@ -937,8 +937,10 @@ private[spark] object Utils extends Logging {
    */
   def inShutdown(): Boolean = {
     try {
-      val hook = new Thread {
-        override def run() {}
+      if (hook == null) {
+        hook = new Thread {
+          override def run() {}
+        }
       }
       Runtime.getRuntime.addShutdownHook(hook)
       Runtime.getRuntime.removeShutdownHook(hook)
