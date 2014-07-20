@@ -57,38 +57,9 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
   private val yarnConf: YarnConfiguration = new YarnConfiguration(conf)
 
   private var yarnAllocator: YarnAllocationHandler = _
-  private var driverClosed:Boolean = false
-
   private var amClient: AMRMClient[ContainerRequest] = _
 
-  val securityManager = new SecurityManager(sparkConf)
-  val actorSystem: ActorSystem = AkkaUtils.createActorSystem("sparkYarnAM", Utils.localHostName, 0,
-    conf = sparkConf, securityManager = securityManager)._1
-  var actor: ActorRef = _
 
-  // This actor just working as a monitor to watch on Driver Actor.
-  class MonitorActor(driverUrl: String) extends Actor {
-
-    var driver: ActorSelection = _
-
-    override def preStart() {
-      logInfo("Listen to driver: " + driverUrl)
-      driver = context.actorSelection(driverUrl)
-      // Send a hello message to establish the connection, after which
-      // we can monitor Lifecycle Events.
-      driver ! "Hello"
-      context.system.eventStream.subscribe(self, classOf[RemotingLifecycleEvent])
-    }
-
-    override def receive = {
-      case x: DisassociatedEvent =>
-        logInfo(s"Driver terminated or disconnected! Shutting down. $x")
-        driverClosed = true
-      case x: AddWebUIFilter =>
-        logInfo(s"Add WebUI Filter. $x")
-        driver ! x
-    }
-  }
 
   def run() {
 
@@ -119,15 +90,12 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
       System.getProperty("spark.yarn.scheduler.heartbeat.interval-ms", "5000").toLong
     // must be <= timeoutInterval / 2.
     val interval = math.min(timeoutInterval / 2, schedulerInterval)
-
     reporterThread = launchReporterThread(interval)
-
-
     // Wait for the reporter thread to Finish.
     reporterThread.join()
 
     finishApplicationMaster(FinalApplicationStatus.SUCCEEDED)
-    actorSystem.shutdown()
+    yarnAllocator.stop()
 
     logInfo("Exited")
     System.exit(0)
@@ -161,7 +129,7 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
     val uriBase = "http://" + proxy + proxyBase
     val amFilter = "PROXY_HOST=" + parts(0) + "," + "PROXY_URI_BASE=" + uriBase
     val amFilterName = "org.apache.hadoop.yarn.server.webproxy.amfilter.AmIpFilter"
-    actor ! AddWebUIFilter(amFilterName, amFilter, proxyBase)
+    yarnAllocator.actor ! AddWebUIFilter(amFilterName, amFilter, proxyBase)
   }
 
   private def waitForSparkMaster() {
@@ -184,11 +152,6 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
     }
     sparkConf.set("spark.driver.host", driverHost)
     sparkConf.set("spark.driver.port", driverPort.toString)
-
-    val driverUrl = "akka.tcp://spark@%s:%s/user/%s".format(
-      driverHost, driverPort.toString, CoarseGrainedSchedulerBackend.ACTOR_NAME)
-
-    actor = actorSystem.actorOf(Props(new MonitorActor(driverUrl)), name = "YarnAM")
   }
 
 
@@ -209,7 +172,8 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
     // Wait until all containers have launched
     yarnAllocator.addResourceRequests(args.numExecutors)
     yarnAllocator.allocateResources()
-    while ((yarnAllocator.getNumExecutorsRunning < args.numExecutors) && (!driverClosed)) {
+    while ((yarnAllocator.getNumExecutorsRunning < args.numExecutors) &&
+      (!yarnAllocator.driverClosed)) {
       allocateMissingExecutor()
       yarnAllocator.allocateResources()
       Thread.sleep(100)
@@ -233,7 +197,7 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
 
     val t = new Thread {
       override def run() {
-        while (!driverClosed) {
+        while (!yarnAllocator.driverClosed) {
           allocateMissingExecutor()
           logDebug("Sending progress")
           yarnAllocator.allocateResources()

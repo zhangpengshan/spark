@@ -22,14 +22,18 @@ import java.util.{Collections, Set => JSet}
 import java.util.concurrent.{CopyOnWriteArrayList, ConcurrentHashMap}
 import java.util.concurrent.atomic.AtomicInteger
 
+import akka.actor._
+import akka.remote.{DisassociatedEvent, RemotingLifecycleEvent}
+import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{AddWebUIFilter, RemoveExecutor}
+
 import scala.collection
 import scala.collection.JavaConversions._
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 
-import org.apache.spark.{Logging, SparkConf}
-import org.apache.spark.scheduler.{SplitInfo,TaskSchedulerImpl}
+import org.apache.spark.{SecurityManager, Logging, SparkConf}
+import org.apache.spark.scheduler.{ExecutorExited, SplitInfo, TaskSchedulerImpl}
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
-import org.apache.spark.util.Utils
+import org.apache.spark.util.{AkkaUtils, Utils}
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.yarn.api.ApplicationMasterProtocol
@@ -78,6 +82,7 @@ private[yarn] class YarnAllocationHandler(
     new HashMap[String, collection.mutable.Set[ContainerId]]()
 
   private val allocatedContainerToHostMap = new HashMap[ContainerId, String]()
+  private val allocatedContainerToExecutorId = new HashMap[ContainerId, String]()
 
   // allocatedRackCount is populated ONLY if allocation happens (or decremented if this is an
   // allocated node)
@@ -102,6 +107,42 @@ private[yarn] class YarnAllocationHandler(
   private val executorIdCounter = new AtomicInteger()
   private val lastResponseId = new AtomicInteger()
   private val numExecutorsFailed = new AtomicInteger()
+
+  var driverClosed: Boolean = false
+  val securityManager = new SecurityManager(sparkConf)
+  val actorSystem: ActorSystem = AkkaUtils.createActorSystem("sparkYarnAM", Utils.localHostName, 0,
+    conf = sparkConf, securityManager = securityManager)._1
+  val driverUrl = "akka.tcp://spark@%s:%s/user/%s".format(
+    sparkConf.get("spark.driver.host"),
+    sparkConf.get("spark.driver.port"),
+    CoarseGrainedSchedulerBackend.ACTOR_NAME)
+  var actor = actorSystem.actorOf(Props(new MonitorActor(driverUrl)), name = "YarnAM")
+
+  // This actor just working as a monitor to watch on Driver Actor.
+  class MonitorActor(driverUrl: String) extends Actor {
+
+    var driver: ActorSelection = _
+
+    override def preStart() {
+      logInfo("Listen to driver: " + driverUrl)
+      driver = context.actorSelection(driverUrl)
+      // Send a hello message to establish the connection, after which
+      // we can monitor Lifecycle Events.
+      driver ! "Hello"
+      context.system.eventStream.subscribe(self, classOf[RemotingLifecycleEvent])
+    }
+
+    override def receive = {
+      case x: DisassociatedEvent =>
+        logInfo(s"Driver terminated or disconnected! Shutting down. $x")
+        driverClosed = true
+      case x: AddWebUIFilter =>
+        logInfo(s"Add WebUI Filter. $x")
+        driver ! x
+      case x: RemoveExecutor =>
+        driver ! x
+    }
+  }
 
   def getNumPendingAllocate: Int = numPendingAllocate.intValue
 
@@ -262,15 +303,11 @@ private[yarn] class YarnAllocationHandler(
           numExecutorsRunning.decrementAndGet()
         } else {
           val executorId = executorIdCounter.incrementAndGet().toString
-          val driverUrl = "akka.tcp://spark@%s:%s/user/%s".format(
-            sparkConf.get("spark.driver.host"),
-            sparkConf.get("spark.driver.port"),
-            CoarseGrainedSchedulerBackend.ACTOR_NAME)
-
           logInfo("Launching container %s for on host %s".format(containerId, executorHostname))
 
           // To be safe, remove the container from `pendingReleaseContainers`.
           pendingReleaseContainers.remove(containerId)
+          allocatedContainerToExecutorId.put(containerId, executorId)
 
           val rack = YarnAllocationHandler.lookupRack(conf, executorHostname)
           allocatedHostToContainersMap.synchronized {
@@ -336,6 +373,12 @@ private[yarn] class YarnAllocationHandler(
           if (completedContainer.getExitStatus() != 0) {
             logInfo("Container marked as failed: " + containerId)
             numExecutorsFailed.incrementAndGet()
+            if (allocatedContainerToExecutorId.contains(containerId)) {
+              val executorId = allocatedContainerToExecutorId(containerId)
+              val reason = ExecutorExited(completedContainer.getExitStatus())
+              actor ! RemoveExecutor(executorId, reason.toString)
+              allocatedContainerToExecutorId.remove(containerId)
+            }
           }
         }
 
@@ -488,7 +531,7 @@ private[yarn] class YarnAllocationHandler(
 
     for (request <- containerRequests) {
       val nodes = request.getNodes
-      var hostStr = if (nodes == null || nodes.isEmpty) {
+      val hostStr = if (nodes == null || nodes.isEmpty) {
         "Any"
       } else {
         nodes.last
@@ -498,6 +541,10 @@ private[yarn] class YarnAllocationHandler(
         request.getPriority().getPriority,
         request.getCapability))
     }
+  }
+
+  def stop(){
+    actorSystem.shutdown()
   }
 
   private def createResourceRequests(
