@@ -73,12 +73,10 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
 
     appAttemptId = ApplicationMaster.getApplicationAttemptId()
     registerApplicationMaster()
-
     waitForSparkMaster()
-    addAmIpFilter()
-
     // Allocate all containers
     allocateExecutors()
+    addAmIpFilter()
 
     // Launch a progress reporter thread, else app will get killed after expiration
     // (def: 10mins) timeout ensure that progress is sent before
