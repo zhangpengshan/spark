@@ -932,20 +932,18 @@ private[spark] object Utils extends Logging {
    * the current thread is a running a shutdown hook but may spuriously return true otherwise (e.g.
    * if System.exit was just called by a concurrent thread).
    *
-   * Currently, this detects whether the JVM is shutting down by Runtime#addShutdownHook throwing
-   * an IllegalStateException.
+   * Based on Dikran's blog:
+   * http://www.seropian.eu/2009/10/how-to-know-when-java-virtual-machine-is-shutting-down.html
    */
   def inShutdown(): Boolean = {
     try {
-      if (hook == null) {
-        hook = new Thread {
-          override def run() {}
-        }
-      }
-      Runtime.getRuntime.addShutdownHook(hook)
-      Runtime.getRuntime.removeShutdownHook(hook)
+      val running = Class.forName("java.lang.Shutdown").getDeclaredField("RUNNING")
+      val state = Class.forName("java.lang.Shutdown").getDeclaredField("state")
+      running.setAccessible(true)
+      state.setAccessible(true)
+      return state.getInt(null) > running.getInt(null);
     } catch {
-      case ise: IllegalStateException => return true
+      case ise: Exception => return false
     }
     false
   }
