@@ -118,16 +118,17 @@ private[spark] class YarnClientSchedulerBackend(
   }
 
   private def yarnApplicationStateCheckerThread(): Thread = {
-    var sparkContextStop = false
+    var sparkContextStopped = false
     val t = new Thread {
       override def run() {
-        while (!sparkContextStop) {
+        while (!sparkContextStopped) {
           val report = client.getApplicationReport(appId)
           val state = report.getYarnApplicationState()
-          if (state != YarnApplicationState.RUNNING) {
-            sparkContextStop = true
+          if (state == YarnApplicationState.FINISHED || state == YarnApplicationState.KILLED
+            || state == YarnApplicationState.FAILED) {
             logError(s"Yarn application already ended: $state")
             sc.stop()
+            sparkContextStopped = true
           }
           Thread.sleep(1000L)
         }
@@ -139,8 +140,10 @@ private[spark] class YarnClientSchedulerBackend(
   }
 
   override def stop() {
-    checkerThread.interrupt()
-    checkerThread = null
+    if (checkerThread != null) {
+      checkerThread.interrupt()
+      checkerThread = null
+    }
     super.stop()
     client.stop
     logInfo("Stopped")
