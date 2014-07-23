@@ -19,6 +19,7 @@ package org.apache.spark.deploy.yarn
 
 import java.net.Socket
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.yarn.api.ApplicationConstants
 import org.apache.hadoop.yarn.api.records._
 import org.apache.hadoop.yarn.api.protocolrecords._
 import org.apache.hadoop.yarn.conf.YarnConfiguration
@@ -53,9 +54,10 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
   private val yarnConf: YarnConfiguration = new YarnConfiguration(conf)
 
   private var yarnAllocator: YarnAllocationHandler = _
+
   private var driverClosed: Boolean = false
   private var isFinished: Boolean = false
-  private var registered = false
+  private var registered: Boolean = false
 
   private var amClient: AMRMClient[ContainerRequest] = _
 
@@ -269,12 +271,12 @@ class ExecutorLauncher(args: ApplicationMasterArguments, conf: Configuration, sp
       if (isFinished) {
         return
       }
-      isFinished = true
       logInfo("Unregistering ApplicationMaster with " + status)
       if (registered) {
         val trackingUrl = sparkConf.get("spark.yarn.historyServer.address", "")
         amClient.unregisterApplicationMaster(status, appMessage, trackingUrl)
       }
+      isFinished = true
     }
   }
 
