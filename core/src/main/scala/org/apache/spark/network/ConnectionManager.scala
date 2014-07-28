@@ -57,6 +57,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
 
   // default to 30 second timeout waiting for authentication
   private val authTimeout = conf.getInt("spark.core.connection.auth.wait.timeout", 30)
+  private val timeoutMs = conf.getInt("spark.core.connection.timeoutMs", 60000)
 
   private val handleMessageExecutor = new ThreadPoolExecutor(
     conf.getInt("spark.core.connection.handler.threads.min", 20),
@@ -303,7 +304,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
 
         val selectedKeysCount =
           try {
-            selector.select()
+            selector.select(timeoutMs)
           } catch {
             // Explicitly only dealing with CancelledKeyException here since other exceptions
             // should be dealt with differently.
@@ -395,6 +396,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
       try {
         val newConnectionId = new ConnectionId(id, idCount.getAndIncrement.intValue)
         val newConnection = new ReceivingConnection(newChannel, selector, newConnectionId)
+        newConnection.channel.socket().setSoTimeout(timeoutMs)
         newConnection.onReceive(receiveMessage)
         addListeners(newConnection)
         addConnection(newConnection)
