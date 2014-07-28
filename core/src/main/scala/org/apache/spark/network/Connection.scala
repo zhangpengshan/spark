@@ -43,6 +43,7 @@ abstract class Connection(val channel: SocketChannel, val selector: Selector,
   channel.socket.setTcpNoDelay(true)
   channel.socket.setReuseAddress(true)
   channel.socket.setKeepAlive(true)
+  channel.socket().setSoTimeout(10000)
   /* channel.socket.setReceiveBufferSize(32768) */
 
   @volatile private var closed = false
