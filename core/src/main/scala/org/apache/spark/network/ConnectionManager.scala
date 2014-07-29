@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import java.util.concurrent.{LinkedBlockingDeque, TimeUnit, ThreadPoolExecutor}
 
+import io.netty.util.{Timeout, TimerTask, HashedWheelTimer}
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.mutable.HashMap
 import scala.collection.mutable.HashSet
@@ -58,6 +59,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
   // default to 30 second timeout waiting for authentication
   private val authTimeout = conf.getInt("spark.core.connection.auth.wait.timeout", 30)
   private val timeoutMs = conf.getInt("spark.core.connection.timeoutMs", 60000)
+  private val timer = new HashedWheelTimer(10, TimeUnit.MILLISECONDS)
 
   private val handleMessageExecutor = new ThreadPoolExecutor(
     conf.getInt("spark.core.connection.handler.threads.min", 20),
@@ -154,7 +156,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
           }
         }
       }
-    } )
+    })
   }
 
   private val readRunnableStarted: HashSet[SelectionKey] = new HashSet[SelectionKey]()
@@ -166,7 +168,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
     readRunnableStarted.synchronized {
       // So that we do not trigger more read events while processing this one.
       // The read method will re-register when done.
-      if (conn.changeInterestForRead())conn.unregisterInterest()
+      if (conn.changeInterestForRead()) conn.unregisterInterest()
       if (readRunnableStarted.contains(key)) {
         return
       }
@@ -187,7 +189,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
           }
         }
       }
-    } )
+    })
   }
 
   private def triggerConnect(key: SelectionKey) {
@@ -215,7 +217,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
         // not succeed : hence the loop to retry a few 'times'.
         conn.finishConnect(true)
       }
-    } )
+    })
   }
 
   // MUST be called within selector loop - else deadlock.
@@ -252,7 +254,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
 
   def run() {
     try {
-      while(!selectorThread.isInterrupted) {
+      while (!selectorThread.isInterrupted) {
         while (!registerRequests.isEmpty) {
           val conn: SendingConnection = registerRequests.dequeue()
           addListeners(conn)
@@ -260,7 +262,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
           addConnection(conn)
         }
 
-        while(!keyInterestChangeRequests.isEmpty) {
+        while (!keyInterestChangeRequests.isEmpty) {
           val (key, ops) = keyInterestChangeRequests.dequeue()
 
           try {
@@ -282,7 +284,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
                   }
 
                   logTrace("Changed key for connection to [" +
-                    connection.getRemoteConnectionManagerId()  + "] changed from [" +
+                    connection.getRemoteConnectionManagerId() + "] changed from [" +
                       intToOpStr(lastOps) + "] to [" + intToOpStr(ops) + "]")
                 }
               }
@@ -315,7 +317,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
               while (allKeys.hasNext) {
                 val key = allKeys.next()
                 try {
-                  if (! key.isValid) {
+                  if (!key.isValid) {
                     logInfo("Key not valid ? " + key)
                     throw new CancelledKeyException()
                   }
@@ -527,7 +529,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
       }
       return
     } else {
-      var replyToken : Array[Byte] = null
+      var replyToken: Array[Byte] = null
       try {
         replyToken = waitingConn.sparkSaslClient.saslResponse(securityMsg.getToken)
         if (waitingConn.isSaslComplete()) {
@@ -559,7 +561,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
       connectionId: ConnectionId) {
     if (!connection.isSaslComplete()) {
       logDebug("saslContext not established")
-      var replyToken : Array[Byte] = null
+      var replyToken: Array[Byte] = null
       try {
         connection.synchronized {
           if (connection.sparkSaslServer == null) {
@@ -605,7 +607,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
       connectionsAwaitingSasl.get(connectionId) match {
         case Some(waitingConn) => {
           // Client - this must be in response to us doing Send
-          logDebug("Client handleAuth for id: " +  waitingConn.connectionId)
+          logDebug("Client handleAuth for id: " + waitingConn.connectionId)
           handleClientAuthentication(waitingConn, securityMsg, connectionId)
         }
         case None => {
@@ -763,7 +765,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
     }
     message.senderAddress = id.toSocketAddress()
     logDebug("Before Sending [" + message + "] to [" + connectionManagerId + "]" + " " +
-      "connectionid: "  + connection.connectionId)
+      "connectionid: " + connection.connectionId)
 
     if (authEnabled) {
       // if we aren't authenticated yet lets block the senders until authentication completes
@@ -817,6 +819,33 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
     selector.wakeup()
   }
 
+  private def timeoutMessageStatus[T](msg: Message, future: Future[T]): Future[T] = {
+    val after = timeoutMs.milliseconds
+    val timerTask = new TimerTask {
+      def run(timeout: Timeout) {
+        messageStatuses.synchronized {
+          messageStatuses.get(msg.id) match {
+            case Some(status) => {
+              messageStatuses -= msg.id
+              logInfo("Notifying " + status)
+              status.synchronized {
+                status.attempted = true
+                status.acked = false
+                status.markDone()
+              }
+            }
+            case None => {
+              // TODO: ?
+            }
+          }
+        }
+      }
+    }
+    val timeout = timer.newTimeout(timerTask, after.toNanos, TimeUnit.NANOSECONDS)
+    future.onComplete { case result => timeout.cancel()}
+    future
+  }
+
   def sendMessageReliably(connectionManagerId: ConnectionManagerId, message: Message)
       : Future[Option[Message]] = {
     val promise = Promise[Option[Message]]
@@ -826,7 +855,7 @@ private[spark] class ConnectionManager(port: Int, conf: SparkConf,
       messageStatuses += ((message.id, status))
     }
     sendMessage(connectionManagerId, message)
-    promise.future
+    timeoutMessageStatus(message, promise.future)
   }
 
   def sendMessageReliablySync(connectionManagerId: ConnectionManagerId,
