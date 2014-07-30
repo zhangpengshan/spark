@@ -31,6 +31,30 @@ import scala.language.postfixOps
   */
 class ConnectionManagerSuite extends FunSuite {
 
+  test("receiver test with timeout") {
+    val conf = new SparkConf
+    conf.set("spark.core.connection.timeoutMs", "100")
+    val securityManager = new SecurityManager(conf)
+    val manager = new ConnectionManager(0, conf, securityManager)
+    var receivedMessage = false
+    manager.onReceiveMessage((msg: Message, id: ConnectionManagerId) => {
+      receivedMessage = true
+      Thread.sleep(2000)
+      val buffer = ByteBuffer.wrap("response".getBytes("utf-8"))
+      Some(Message.createBufferMessage(buffer, msg.id))
+    })
+
+    val msg = Await.result(manager.sendMessageReliably(manager.id, Message.createBufferMessage(
+      ByteBuffer.wrap("request".getBytes("utf-8")))), Duration.Inf)
+    assert(receivedMessage === true)
+    val responseStr = msg.map { response =>
+      val buffer = response.asInstanceOf[BufferMessage].buffers(0)
+      new String(buffer.array, "utf-8")
+    }.getOrElse("none")
+    assert(responseStr === "none")
+    manager.stop()
+  }
+
   test("security default off") {
     val conf = new SparkConf
     val securityManager = new SecurityManager(conf)
