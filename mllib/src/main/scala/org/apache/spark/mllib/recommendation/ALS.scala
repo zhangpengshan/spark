@@ -193,6 +193,7 @@ class ALS private (
    */
   def run(ratings: RDD[Rating]): MatrixFactorizationModel = {
     val sc = ratings.context
+    ratings.persist(StorageLevel.MEMORY_AND_DISK_SER)
 
     val numUserBlocks = if (this.numUserBlocks == -1) {
       math.max(sc.defaultParallelism, ratings.partitions.size / 2)
@@ -220,10 +221,10 @@ class ALS private (
       makeLinkRDDs(numUserBlocks, numProductBlocks, ratingsByUserBlock, productPartitioner)
     val (productInLinks, productOutLinks) =
       makeLinkRDDs(numProductBlocks, numUserBlocks, ratingsByProductBlock, userPartitioner)
-    userInLinks.setName("userInLinks")
-    userOutLinks.setName("userOutLinks")
-    productInLinks.setName("productInLinks")
-    productOutLinks.setName("productOutLinks")
+    userInLinks.setName("userInLinks").persist(StorageLevel.MEMORY_AND_DISK_SER)
+    userOutLinks.setName("userOutLinks").persist(StorageLevel.MEMORY_AND_DISK_SER)
+    productInLinks.setName("productInLinks").persist(StorageLevel.MEMORY_AND_DISK_SER)
+    productOutLinks.setName("productOutLinks").persist(StorageLevel.MEMORY_AND_DISK_SER)
 
     // Initialize user and product factors randomly, but use a deterministic seed for each
     // partition so that fault recovery works
@@ -248,17 +249,17 @@ class ALS private (
         // perform ALS update
         logInfo("Re-computing I given U (Iteration %d/%d)".format(iter, iterations))
         // Persist users because it will be called twice.
-        users.setName(s"users-$iter").persist()
+        users.setName(s"users-$iter").persist(StorageLevel.MEMORY_AND_DISK_SER)
         val YtY = Some(sc.broadcast(computeYtY(users)))
         val previousProducts = products
         products = updateFeatures(numProductBlocks, users, userOutLinks, productInLinks,
           rank, lambda, alpha, YtY)
         previousProducts.unpersist()
         logInfo("Re-computing U given I (Iteration %d/%d)".format(iter, iterations))
-        if (sc.checkpointDir.isDefined && (iter % 3 == 1)) {
+        if (sc.checkpointDir.isDefined && (iter % 3 == 0)) {
           products.checkpoint()
         }
-        products.setName(s"products-$iter").persist()
+        products.setName(s"products-$iter").persist(StorageLevel.MEMORY_AND_DISK_SER)
         val XtX = Some(sc.broadcast(computeYtY(products)))
         val previousUsers = users
         users = updateFeatures(numUserBlocks, products, productOutLinks, userInLinks,
@@ -271,14 +272,14 @@ class ALS private (
         logInfo("Re-computing I given U (Iteration %d/%d)".format(iter, iterations))
         products = updateFeatures(numProductBlocks, users, userOutLinks, productInLinks,
           rank, lambda, alpha, YtY = None)
-        if (sc.checkpointDir.isDefined && (iter % 3 == 1)) {
+        if (sc.checkpointDir.isDefined && (iter % 3 == 0)) {
           products.checkpoint()
         }
-        products.setName(s"products-$iter")
+        products.setName(s"products-$iter").persist(StorageLevel.MEMORY_AND_DISK_SER)
         logInfo("Re-computing U given I (Iteration %d/%d)".format(iter, iterations))
         users = updateFeatures(numUserBlocks, products, productOutLinks, userInLinks,
           rank, lambda, alpha, YtY = None)
-        users.setName(s"users-$iter")
+        users.setName(s"users-$iter").persist(StorageLevel.MEMORY_AND_DISK_SER)
       }
     }
 
