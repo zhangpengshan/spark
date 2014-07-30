@@ -193,7 +193,6 @@ class ALS private (
    */
   def run(ratings: RDD[Rating]): MatrixFactorizationModel = {
     val sc = ratings.context
-    ratings.persist(StorageLevel.MEMORY_AND_DISK_SER)
 
     val numUserBlocks = if (this.numUserBlocks == -1) {
       math.max(sc.defaultParallelism, ratings.partitions.size / 2)
