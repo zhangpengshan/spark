@@ -220,10 +220,10 @@ class ALS private (
       makeLinkRDDs(numUserBlocks, numProductBlocks, ratingsByUserBlock, productPartitioner)
     val (productInLinks, productOutLinks) =
       makeLinkRDDs(numProductBlocks, numUserBlocks, ratingsByProductBlock, userPartitioner)
-    userInLinks.setName("userInLinks").persist(StorageLevel.MEMORY_AND_DISK_SER)
-    userOutLinks.setName("userOutLinks").persist(StorageLevel.MEMORY_AND_DISK_SER)
-    productInLinks.setName("productInLinks").persist(StorageLevel.MEMORY_AND_DISK_SER)
-    productOutLinks.setName("productOutLinks").persist(StorageLevel.MEMORY_AND_DISK_SER)
+    userInLinks.setName("userInLinks")
+    userOutLinks.setName("userOutLinks")
+    productInLinks.setName("productInLinks")
+    productOutLinks.setName("productOutLinks")
 
     // Initialize user and product factors randomly, but use a deterministic seed for each
     // partition so that fault recovery works
@@ -284,14 +284,14 @@ class ALS private (
 
     // The last `products` will be used twice. One to generate the last `users` and the other to
     // generate `productsOut`. So we cache it for better performance.
-    products.setName("products").persist()
+    products.setName("products").persist(StorageLevel.MEMORY_AND_DISK_SER)
 
     // Flatten and cache the two final RDDs to un-block them
     val usersOut = unblockFactors(users, userOutLinks)
     val productsOut = unblockFactors(products, productOutLinks)
 
-    usersOut.setName("usersOut").persist()
-    productsOut.setName("productsOut").persist()
+    usersOut.setName("usersOut").persist(StorageLevel.MEMORY_AND_DISK_SER)
+    productsOut.setName("productsOut").persist(StorageLevel.MEMORY_AND_DISK_SER)
 
     // Materialize usersOut and productsOut.
     usersOut.count()
@@ -439,8 +439,8 @@ class ALS private (
     }, preservesPartitioning = true)
     val inLinks = links.mapValues(_._1)
     val outLinks = links.mapValues(_._2)
-    inLinks.persist(StorageLevel.MEMORY_AND_DISK)
-    outLinks.persist(StorageLevel.MEMORY_AND_DISK)
+    inLinks.persist(StorageLevel.MEMORY_AND_DISK_SER)
+    outLinks.persist(StorageLevel.MEMORY_AND_DISK_SER)
     (inLinks, outLinks)
   }
 
