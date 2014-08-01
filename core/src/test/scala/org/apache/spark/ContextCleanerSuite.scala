@@ -208,9 +208,10 @@ class ContextCleanerSuite extends ContextCleanerSuiteBase {
   }
 
   test("automatically cleanup checkpoint data") {
+    sc.stop()
     val conf=new SparkConf().setMaster("local[2]").setAppName("cleanupCheckpointData").
-      set("spark.cleaner.checkpointData.enabled","true")
-    sc =new SparkContext(conf)
+      set("spark.cleaner.referenceTracking.cleanCheckpoints","true")
+    sc = new SparkContext(conf)
     val checkpointDir = java.io.File.createTempFile("temp", "")
     checkpointDir.deleteOnExit()
     checkpointDir.delete()
@@ -224,8 +225,10 @@ class ContextCleanerSuite extends ContextCleanerSuiteBase {
       val fs = path.getFileSystem(sc.hadoopConfiguration)
       assert(fs.exists(path))
     }
+
+    // Test that GC causes checkpoint data cleanup after dereferencing the RDD
     val postGCTester = new CleanerTester(sc, Seq(rddId), Nil, Nil)
-    rdd = null
+    rdd = null  // Make RDD out of scope
     runGC()
     postGCTester.assertCleanup()
     RDDCheckpointData.rddCheckpointDataPath(sc, rddId).foreach { path =>
