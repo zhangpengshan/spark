@@ -1207,6 +1207,11 @@ private[spark] object Utils extends Logging {
   val isWindows = SystemUtils.IS_OS_WINDOWS
 
   /**
+   * Whether the underlying operating system is Mac OS X.
+   */
+  val isMac = SystemUtils.IS_OS_MAC_OSX
+
+  /**
    * Pattern for matching a Windows drive, which contains only a single alphabet character.
    */
   val windowsDrive = "([a-zA-Z])".r
@@ -1442,6 +1447,17 @@ private[spark] object Utils extends Logging {
       case e: Exception => isBindCollision(e.getCause)
       case _ => false
     }
+  }
+
+  /**
+   * Return the current system LD_LIBRARY_PATH environment
+   */
+  def libraryPath: String = if (isWindows) {
+    "PATH"
+  } else if (isMac) {
+    "DYLD_LIBRARY_PATH"
+  } else {
+    "LD_LIBRARY_PATH"
   }
 
 }
