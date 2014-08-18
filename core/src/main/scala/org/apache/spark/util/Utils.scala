@@ -1460,6 +1460,14 @@ private[spark] object Utils extends Logging {
     "LD_LIBRARY_PATH"
   }
 
+  def libraryPath$: String = {
+    if (Utils.isWindows) {
+      s"%${Utils.libraryPath}%"
+    } else {
+      "$" + Utils.libraryPath
+    }
+  }
+
 }
 
 /**

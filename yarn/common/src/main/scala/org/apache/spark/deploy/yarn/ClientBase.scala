@@ -38,6 +38,7 @@ import org.apache.hadoop.yarn.api.records._
 import org.apache.hadoop.yarn.conf.YarnConfiguration
 import org.apache.hadoop.yarn.util.Records
 import org.apache.spark.{Logging, SecurityManager, SparkConf, SparkContext, SparkException}
+import org.apache.spark.util.Utils
 
 /**
  * The entry point (starting in Client#main() and Client#run()) for launching Spark on YARN. The
@@ -310,7 +311,6 @@ trait ClientBase extends Logging {
         env: HashMap[String, String]): ContainerLaunchContext = {
     logInfo("Setting up container launch context")
     val amContainer = Records.newRecord(classOf[ContainerLaunchContext])
-    amContainer.setLocalResources(localResources)
 
     val isLaunchingDriver = args.userClass != null
 
@@ -344,10 +344,8 @@ trait ClientBase extends Logging {
         env("SPARK_JAVA_OPTS") = value
       }
     }
-    amContainer.setEnvironment(env)
 
     val amMemory = calculateAMMemory(newApp)
-
     val javaOpts = ListBuffer[String]()
 
     // Add Xmx for AM memory
@@ -386,8 +384,12 @@ trait ClientBase extends Logging {
       sparkConf.getOption("spark.driver.extraJavaOptions")
         .orElse(sys.env.get("SPARK_JAVA_OPTS"))
         .foreach(opts => javaOpts += opts)
-      sparkConf.getOption("spark.driver.libraryPath")
-        .foreach(p => javaOpts += s"-Djava.library.path=$p")
+      var libraryPaths = Seq(sys.props.get("spark.driver.extraLibraryPath"),
+        sys.props.get("spark.driver.libraryPath")).flatten
+      if (libraryPaths.nonEmpty) {
+        libraryPaths = libraryPaths :+ Utils.libraryPath$
+        javaOpts += s"-Djava.library.path=${libraryPaths.mkString(File.pathSeparator)}"
+      }
     }
 
     val userClass =
@@ -425,6 +427,8 @@ trait ClientBase extends Logging {
     // TODO: it would be nicer to just make sure there are no null commands here
     val printableCommands = commands.map(s => if (s == null) "null" else s).toList
     amContainer.setCommands(printableCommands)
+    amContainer.setLocalResources(localResources)
+    amContainer.setEnvironment(env)
 
     setupSecurityToken(amContainer)
 
