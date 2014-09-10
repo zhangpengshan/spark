@@ -635,6 +635,10 @@ private[spark] class TaskSetManager(
             s"${ef.className} (${ef.description}) [duplicate $dupCount]")
         }
 
+      case e :ExecutorExitFailure =>
+        taskMetrics = e.metrics.orNull
+        logWarning(failureReason)
+
       case e: TaskFailedReason =>  // TaskResultLost, TaskKilled, and others
         logWarning(failureReason)
 

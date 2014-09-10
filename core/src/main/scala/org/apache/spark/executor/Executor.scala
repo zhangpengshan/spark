@@ -245,13 +245,18 @@ private[spark] class Executor(
           // the default uncaught exception handler, which will terminate the Executor.
           logError(s"Exception in $taskName (TID $taskId)", t)
 
-          if (!Utils.inShutdown()) {
-            val serviceTime = System.currentTimeMillis() - taskStart
-            val metrics = attemptedTask.flatMap(t => t.metrics)
-            for (m <- metrics) {
-              m.executorRunTime = serviceTime
-              m.jvmGCTime = gcTime - startGCTime
-            }
+          val serviceTime = System.currentTimeMillis() - taskStart
+          val metrics = attemptedTask.flatMap(t => t.metrics)
+          for (m <- metrics) {
+            m.executorRunTime = serviceTime
+            m.jvmGCTime = gcTime - startGCTime
+          }
+
+          if (Utils.inShutdown()) {
+            val reason = ExecutorExitFailure(None, metrics)
+            execBackend.statusUpdate(taskId, TaskState.FAILED, ser.serialize(reason))
+          }
+          else {
             val reason = ExceptionFailure(t.getClass.getName, t.getMessage,
               t.getStackTrace, metrics)
             execBackend.statusUpdate(taskId, TaskState.FAILED, ser.serialize(reason))
