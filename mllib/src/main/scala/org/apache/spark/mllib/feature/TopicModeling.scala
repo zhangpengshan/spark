@@ -92,6 +92,43 @@ object TopicModeling {
     }
   }
 
+  @inline private[mllib] def maxMinIndexSearch[V](v: BSV[V], i: Int,
+    lastReturnedPos: Int): Int = {
+    val array = v.array
+    val index = array.index
+    if (array.activeSize == 0) return -1
+    if (index(0) > i) return -1
+    if (lastReturnedPos >= array.activeSize - 1) return array.activeSize - 1
+    var begin = lastReturnedPos
+    var end = array.activeSize - 1
+    var found = false
+    if (end > i) end = i
+    if (begin < 0) begin = 0
+
+    var mid = (end + begin) >> 1
+
+    while (!found && begin <= end) {
+      if (index(mid) < i) {
+        begin = mid + 1
+        mid = (end + begin) >> 1
+      }
+      else if (index(mid) > i) {
+        end = mid - 1
+        mid = (end + begin) >> 1
+      }
+      else {
+        found = true
+      }
+    }
+
+    if (found || index(mid) < i || mid == 0) {
+      mid
+    }
+    else {
+      mid - 1
+    }
+  }
+
   private[mllib] def collectTermTopicDist(graph: Graph[VD, ED],
     totalTopicCounter: BV[Count],
     sumTerms: Long,
@@ -211,6 +248,24 @@ object TopicModeling {
     (t, t1)
   }
 
+  // scalastyle:off
+  /**
+   * A multinomial distribution sampler, using roulette method to sample an Int back.
+   * Asymmetric Dirichlet Priors you can refer to the paper:
+   * "Rethinking LDA: Why Priors Matter", available at
+   * [[http://people.ee.duke.edu/~lcarin/Eric3.5.2010.pdf]]
+   *
+   * if you want to know more about the above codes, you can refer to the following formula:
+   * First), the original Gibbis sampling formula is :<img src="http://www.forkosh.com/mathtex.cgi? P(z^{(d)}_{n}|W, Z_{\backslash d,n}, \alpha u, \beta u)\propto P(w^{(d)}_{n}|z^{(d)}_{n},W_{\backslash d,n}, Z_{\backslash d,n}, \beta u) P(z^{(d)}_{n}|Z_{\backslash d,n}, \alpha u)"> (1)
+   * Second), using the Asymmetric Dirichlet Priors, the second term of formula (1) can be written as following:
+   * <img src="http://www.forkosh.com/mathtex.cgi? P(z^{(d)}_{N_{d+1}}=t|Z, \alpha, \alpha^{'}u)=\int dm P(z^{(d)}_{N_{d+1}}=t|Z, \alpha m)P(m|Z, \alpha^{'}u)=\frac{N_{t|d}+\alpha \frac{\widehat{N}_{T}+\frac{\alpha^{'}}{T}}{\Sigma_{t}\widehat{N}_{t}+ \alpha ^{'}}}{N_{d}+\alpha}"> (2)
+   * Third), in this code, we set the <img src="http://www.forkosh.com/mathtex.cgi? \alpha=\alpha^{'}">, you can set different value for them. Additionally, in our code the parameter "alpha" is equal to <img src="http://www.forkosh.com/mathtex.cgi?\alpha * T">;
+   * "adjustment" denote that if this is the current topic, you need to reduce number one from the corresponding term;
+   * <img src="http://www.forkosh.com/mathtex.cgi? ratio=\frac{\widehat{N}_{t}+\frac{\alpha^{'}}{T}}{\Sigma _{t}\widehat{N}_{t}+\alpha^{'}} \qquad asPrior = ratio * (alpha * numTopics)">;
+   * Finally), we put them into formula (1) to get the final Asymmetric Dirichlet Priors Gibbs sampling formula.
+   *
+   */
+  // scalastyle:on
   private[mllib] def sampleTopics(
     graph: Graph[VD, ED],
     totalTopicCounter: BV[Count],
@@ -222,22 +277,22 @@ object TopicModeling {
     beta: Double
   ): Graph[VD, ED] = {
     val parts = graph.edges.partitions.size
-    val (t, t1) = TopicModeling.collectGlobalTopicDist(totalTopicCounter, sumTerms, numTerms,
+    val (t, t1) = collectGlobalTopicDist(totalTopicCounter, sumTerms, numTerms,
       numTopics, alpha, beta)
     val sampleTopics = (gen: java.util.Random, d: BDV[Double], d1: BDV[Double],
     triplet: EdgeTriplet[VD, ED]) => {
       assert(triplet.srcId >= 0)
       val (termCounter, Some((w, w1))) = triplet.srcAttr
       val (docTopicCounter, _) = triplet.dstAttr
-      TopicModeling.collectDocTopicDist(totalTopicCounter, termCounter,
+      collectDocTopicDist(totalTopicCounter, termCounter,
         docTopicCounter, d, d1, sumTerms, numTerms, numTopics, alpha, beta)
 
       val topics = triplet.attr
       var i = 0
       while (i < topics.length) {
         val oldTopic = topics(i)
-        val newTopic = TopicModeling.multinomialDistSampler(gen, d, w, t, d1(oldTopic),
-          w1(oldTopic), t1(oldTopic), oldTopic)
+        val newTopic = multinomialDistSampler(gen, docTopicCounter.asInstanceOf[BSV[Count]],
+          d, w.asInstanceOf[BSV[Double]], t, d1(oldTopic), w1(oldTopic), t1(oldTopic), oldTopic)
         topics(i) = newTopic
         i += 1
       }
@@ -289,47 +344,9 @@ object TopicModeling {
     }
   }
 
-  // scalastyle:off
-  /**
-   * A multinomial distribution sampler, using roulette method to sample an Int back.
-   * Asymmetric Dirichlet Priors you can refer to the paper:
-   * "Rethinking LDA: Why Priors Matter", available at
-   * [[http://people.ee.duke.edu/~lcarin/Eric3.5.2010.pdf]]
-   *
-   * if you want to know more about the above codes, you can refer to the following formula:
-   * First), the original Gibbis sampling formula is :<img src="http://www.forkosh.com/mathtex.cgi? P(z^{(d)}_{n}|W, Z_{\backslash d,n}, \alpha u, \beta u)\propto P(w^{(d)}_{n}|z^{(d)}_{n},W_{\backslash d,n}, Z_{\backslash d,n}, \beta u) P(z^{(d)}_{n}|Z_{\backslash d,n}, \alpha u)"> (1)
-   * Second), using the Asymmetric Dirichlet Priors, the second term of formula (1) can be written as following:
-   * <img src="http://www.forkosh.com/mathtex.cgi? P(z^{(d)}_{N_{d+1}}=t|Z, \alpha, \alpha^{'}u)=\int dm P(z^{(d)}_{N_{d+1}}=t|Z, \alpha m)P(m|Z, \alpha^{'}u)=\frac{N_{t|d}+\alpha \frac{\widehat{N}_{T}+\frac{\alpha^{'}}{T}}{\Sigma_{t}\widehat{N}_{t}+ \alpha ^{'}}}{N_{d}+\alpha}"> (2)
-   * Third), in this code, we set the <img src="http://www.forkosh.com/mathtex.cgi? \alpha=\alpha^{'}">, you can set different value for them. Additionally, in our code the parameter "alpha" is equal to <img src="http://www.forkosh.com/mathtex.cgi?\alpha * T">;
-   * "adjustment" denote that if this is the current topic, you need to reduce number one from the corresponding term;
-   * <img src="http://www.forkosh.com/mathtex.cgi? ratio=\frac{\widehat{N}_{t}+\frac{\alpha^{'}}{T}}{\Sigma _{t}\widehat{N}_{t}+\alpha^{'}} \qquad asPrior = ratio * (alpha * numTopics)">;
-   * Finally), we put them into formula (1) to get the final Asymmetric Dirichlet Priors Gibbs sampling formula.
-   *
-   */
-  // scalastyle:on
-  @inline private[mllib] def multinomialDistSampler(rand: Random, d: BV[Double], w: BV[Double],
-    t: BV[Double], d1: Double, w1: Double, t1: Double, currentTopic: Int): Int = {
-    /**
-    val dist = t :+ d :+ w
-
-      var newTopic = 0
-      var break = false
-      var adjustment = 0D
-      val distSum = rand.nextDouble() * (dist(dist.length - 1) + d1 + w1 + t1)
-      var i = 0
-      while (i < dist.size && break) {
-        if (i == currentTopic)
-          adjustment = d1 + w1 + t1
-        if (distSum <= dist(i) + adjustment)
-          break = true
-        else
-          i += 1
-      }
-      newTopic = i
-      newTopic
-      */
-
-    // The optimized sampler algorithm.
+  @inline private[mllib] def multinomialDistSampler(rand: Random, docTopicCounter: BSV[Count],
+    d: BDV[Double], w: BSV[Double], t: BV[Double],
+    d1: Double, w1: Double, t1: Double, currentTopic: Int): Int = {
     val numTopics = d.length
     val tSum = t(numTopics - 1) + t1
     val wSum = w(numTopics - 1) + w1
@@ -339,27 +356,31 @@ object TopicModeling {
     var lastDs = 0D
     var lastWs = 0D
     var adjustment = 0D
+    var lastReturnedPos = 0
     var newTopic = numTopics - 1
 
     if (distSum > tSum + wSum) {
-      d.activeIterator.find { case (index, v) =>
+      docTopicCounter.activeIterator.find { case (index, _) =>
+        val v = d(index)
         if (index == currentTopic) adjustment = d1 + w1 + t1
-        distSum <= v + w(index) + t(index) + adjustment
+        lastReturnedPos = maxMinIndexSearch(w, index, lastReturnedPos)
+        if (lastReturnedPos > -1) lastWs = w.data(lastReturnedPos)
+        distSum <= v + lastWs + t(index) + adjustment
       }.foreach(topic => newTopic = topic._1)
     } else if (distSum > tSum) {
       w.activeIterator.find { case (index, v) =>
         if (index == currentTopic) adjustment = d1 + w1 + t1
-        if (d(index) > 0D) lastDs = d(index)
+        lastReturnedPos = maxMinIndexSearch(docTopicCounter, index, lastReturnedPos)
+        if (lastReturnedPos > -1) lastDs = d(docTopicCounter.index(lastReturnedPos))
         distSum <= lastDs + v + t(index) + adjustment
       }.foreach(topic => newTopic = topic._1)
     } else {
       t.activeIterator.find { case (index, v) =>
-        if (d(index) > 0D) lastDs = d(index)
+        if (docTopicCounter(index) > 0D) lastDs = d(index)
         if (w(index) > 0D) lastWs = w(index)
         if (index == currentTopic) adjustment = d1 + w1 + t1
         distSum <= lastDs + lastWs + t(index) + adjustment
       }.foreach(topic => newTopic = topic._1)
-
     }
     newTopic
   }
@@ -399,7 +420,7 @@ object TopicModeling {
       indices.zip(values).map { case (term, counter) =>
         val topic = new Array[Int](counter.toInt)
         for (i <- 0 until counter.toInt) {
-          topic(i) = TopicModeling.uniformDistSampler(gen, numTopics)
+          topic(i) = uniformDistSampler(gen, numTopics)
         }
         Edge(term, newDocId, topic)
       }
@@ -455,7 +476,7 @@ class TopicModeling private[mllib](
   @transient private var globalTopicCounter: BV[Count] = collectGlobalCounter(corpus, numTopics)
   assert(brzSum(globalTopicCounter) == sumTerms)
   @transient private val sc = corpus.vertices.context
-  @transient private val seed = System.nanoTime()
+  @transient private val seed = new Random().nextInt()
   @transient private var innerIter = 1
   @transient private var cachedEdges: EdgeRDD[ED, VD] = null
   @transient private var cachedVertices: VertexRDD[VD] = null

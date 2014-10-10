@@ -22,7 +22,7 @@ import java.util.Random
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV}
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.mllib.linalg.{Vectors, DenseVector => SDV,
-       SparseVector => SSV, Vector => SV}
+SparseVector => SSV, Vector => SV}
 
 import TopicModel.Count
 
@@ -94,7 +94,6 @@ class TopicModel private[mllib](
     rand: Random): SV = {
     val indices = doc.indices
     val topics = doc.values.map(i => new Array[Int](i.toInt))
-    val numTopics = _topicCounter.size
     val topicDist = BSV.zeros[Double](numTopics)
     var docTopicCounter = uniformDistSamplerForDocument(indices, topics, numTopics, rand)
 
@@ -114,15 +113,14 @@ class TopicModel private[mllib](
     numTopics: Int, rand: Random): BSV[Count] = {
     val docTopicCounter = BSV.zeros[Count](numTopics)
     var index = 0
-    var i = 0
     while (index < indices.length) {
+      var i = 0
       while (i < topics(index).length) {
         val newTopic = TopicModeling.uniformDistSampler(rand, numTopics)
         topics(index)(i) = newTopic
         docTopicCounter(newTopic) += 1
         i += 1
       }
-      i = 0
       index += 1
     }
     docTopicCounter
@@ -136,9 +134,9 @@ class TopicModel private[mllib](
     rand: Random): BSV[Count] = {
     val newDocTopicCounter = BSV.zeros[Count](numTopics)
     var index = 0
-    var i = 0
     while (index < indices.length) {
       val term = indices(index)
+      var i = 0
       while (i < topics(index).length) {
         val newTopic = if (realTime) {
           max(docTopicCounter, term)
@@ -149,54 +147,17 @@ class TopicModel private[mllib](
         newDocTopicCounter(newTopic) += 1
         i += 1
       }
-      i = 0
       index += 1
     }
     newDocTopicCounter
   }
 
-  @inline def maxMinIndexSearch(v: BSV[Double], i: Int, lastReturnedPos: Int): Int = {
-    val array = v.array
-    val index = array.index
-    if (array.activeSize == 0) return -1
-    if (index(0) > i) return -1
-    if (lastReturnedPos >= array.activeSize - 1) return array.activeSize - 1
-    var begin = lastReturnedPos
-    var end = array.activeSize - 1
-    var found = false
-    if (end > i) end = i
-    if (begin < 0) begin = 0
-
-    var mid = (end + begin) >> 1
-
-    while (!found && begin <= end) {
-      if (index(mid) < i) {
-        begin = mid + 1
-        mid = (end + begin) >> 1
-      }
-      else if (index(mid) > i) {
-        end = mid - 1
-        mid = (end + begin) >> 1
-      }
-      else {
-        found = true
-      }
-    }
-
-    if (found || index(mid) < i || mid == 0) {
-      mid
-    }
-    else {
-      mid - 1
-    }
-  }
 
   /**
    * A multinomial distribution sampler, using roulette method to sample an Int back.
    */
   @inline private def multinomialDistSampler(rand: Random, t: BDV[Double],
     w: BSV[Double], d: BSV[Double]): Int = {
-    val numTopics = t.size
     val tSum = t(numTopics - 1)
     val wSum = w(numTopics - 1)
     val dSum = d(numTopics - 1)
@@ -207,13 +168,13 @@ class TopicModel private[mllib](
     var newTopic = numTopics - 1
     if (distSum > tSum + wSum) {
       d.activeIterator.find { case (index, v) =>
-        lastReturnedPos = maxMinIndexSearch(w, index, lastReturnedPos)
+        lastReturnedPos = TopicModeling.maxMinIndexSearch(w, index, lastReturnedPos)
         if (lastReturnedPos > -1) lastWsum = w.data(lastReturnedPos)
         distSum <= v + lastWsum + t(index)
       }.foreach(t => newTopic = t._1)
     } else if (distSum > tSum) {
       w.activeIterator.find { case (index, v) =>
-        lastReturnedPos = maxMinIndexSearch(d, index, lastReturnedPos)
+        lastReturnedPos = TopicModeling.maxMinIndexSearch(d, index, lastReturnedPos)
         if (lastReturnedPos > -1) lastDsum = d.data(lastReturnedPos)
         distSum <= lastDsum + v + t(index)
       }.foreach(t => newTopic = t._1)
@@ -231,11 +192,11 @@ class TopicModel private[mllib](
   @inline private def d(docTopicCounter: BV[Count], term: Int): BSV[Double] = {
     val t = BSV.zeros[Double](numTopics)
     var lastSum = 0D
-    docTopicCounter.activeIterator.filter(_._2 > 0).foreach { case (i, v) =>
-      t(i) = v * (_topicTermCounter(term)(i) + beta) /
-        (_topicCounter(i) + (numTerms * beta))
-      lastSum = t(i) + lastSum
-      t(i) = lastSum
+    docTopicCounter.activeIterator.filter(_._2 > 0).foreach { case (topic, cn) =>
+      t(topic) = cn * (_topicTermCounter(term)(topic) + beta) /
+        (_topicCounter(topic) + (numTerms * beta))
+      lastSum = t(topic) + lastSum
+      t(topic) = lastSum
     }
     t(numTopics - 1) = lastSum
     t
