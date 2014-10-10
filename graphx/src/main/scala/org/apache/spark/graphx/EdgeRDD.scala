@@ -33,8 +33,8 @@ import org.apache.spark.graphx.impl.EdgePartitionBuilder
  * `impl.ReplicatedVertexView`.
  */
 class EdgeRDD[@specialized ED: ClassTag, VD: ClassTag](
-    val partitionsRDD: RDD[(PartitionID, EdgePartition[ED, VD])],
-    val targetStorageLevel: StorageLevel = StorageLevel.MEMORY_ONLY)
+    @transient val partitionsRDD: RDD[(PartitionID, EdgePartition[ED, VD])],
+    @transient val targetStorageLevel: StorageLevel = StorageLevel.MEMORY_ONLY)
   extends RDD[Edge[ED]](partitionsRDD.context, List(new OneToOneDependency(partitionsRDD))) {
 
   override def setName(_name: String): this.type = {
@@ -86,6 +86,10 @@ class EdgeRDD[@specialized ED: ClassTag, VD: ClassTag](
   override def cache(): this.type = {
     partitionsRDD.persist(targetStorageLevel)
     this
+  }
+
+  override def checkpoint(): Unit = {
+    partitionsRDD.checkpoint()
   }
 
   private[graphx] def mapEdgePartitions[ED2: ClassTag, VD2: ClassTag](

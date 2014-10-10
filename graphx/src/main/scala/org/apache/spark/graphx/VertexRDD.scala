@@ -56,8 +56,8 @@ import org.apache.spark.graphx.impl.VertexRDDFunctions._
  * @tparam VD the vertex attribute associated with each vertex in the set.
  */
 class VertexRDD[@specialized VD: ClassTag](
-    val partitionsRDD: RDD[ShippableVertexPartition[VD]],
-    val targetStorageLevel: StorageLevel = StorageLevel.MEMORY_ONLY)
+    @transient val partitionsRDD: RDD[ShippableVertexPartition[VD]],
+    @transient val targetStorageLevel: StorageLevel = StorageLevel.MEMORY_ONLY)
   extends RDD[(VertexId, VD)](partitionsRDD.context, List(new OneToOneDependency(partitionsRDD))) {
 
   require(partitionsRDD.partitioner.isDefined)
@@ -104,6 +104,10 @@ class VertexRDD[@specialized VD: ClassTag](
   override def cache(): this.type = {
     partitionsRDD.persist(targetStorageLevel)
     this
+  }
+
+  override def checkpoint(): Unit = {
+    partitionsRDD.checkpoint()
   }
 
   /** The number of vertices in the RDD. */

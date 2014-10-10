@@ -17,6 +17,8 @@
 
 package org.apache.spark.deploy.worker
 
+import scala.collection.Map
+
 import java.io.{File, FileOutputStream, InputStream, IOException}
 import java.lang.System._
 
@@ -38,6 +40,20 @@ object CommandUtils extends Logging {
       command.arguments
   }
 
+  def buildEnvironment(command: Command): Map[String, String] = {
+    val libraryPathEntries = command.libraryPathEntries
+    if (libraryPathEntries.nonEmpty) {
+      val libraryPath = Utils.libraryPath
+      val pathSeparator = File.pathSeparator
+      val sysLibraryPath = sys.env.get(libraryPath)
+      val cmdLibraryPath = command.environment.get(libraryPath)
+      val libraryPaths = libraryPathEntries ++ cmdLibraryPath ++ sysLibraryPath
+      command.environment + ((Utils.libraryPath, libraryPaths.mkString(pathSeparator)))
+    } else {
+      command.environment
+    }
+  }
+
   /**
    * Attention: this must always be aligned with the environment variables in the run scripts and
    * the way the JAVA_OPTS are assembled there.
@@ -53,14 +69,6 @@ object CommandUtils extends Logging {
       logWarning("Set SPARK_LOCAL_DIRS for node-specific storage locations.")
     }
 
-    val libraryOpts =
-      if (command.libraryPathEntries.size > 0) {
-        val joined = command.libraryPathEntries.mkString(File.pathSeparator)
-        Seq(s"-Djava.library.path=$joined")
-      } else {
-        Seq()
-      }
-
     // Figure out our classpath with the external compute-classpath script
     val ext = if (System.getProperty("os.name").startsWith("Windows")) ".cmd" else ".sh"
     val classPath = Utils.executeAndGetOutput(
@@ -71,7 +79,7 @@ object CommandUtils extends Logging {
     val javaVersion = System.getProperty("java.version")
     val permGenOpt = if (!javaVersion.startsWith("1.8")) Some("-XX:MaxPermSize=128m") else None
     Seq("-cp", userClassPath.filterNot(_.isEmpty).mkString(File.pathSeparator)) ++
-      permGenOpt ++ libraryOpts ++ workerLocalOpts ++ command.javaOpts ++ memoryOpts
+      permGenOpt ++ workerLocalOpts ++ command.javaOpts ++ memoryOpts
   }
 
   /** Spawn a thread that will redirect a given stream to a file */
