@@ -98,9 +98,13 @@ class TopicModeling private[mllib](
     Option(cachedVertices).foreach(_.unpersist())
     val vertices = corpus.vertices
 
-    if (innerIter % 5 == 0 && sc.getCheckpointDir.isDefined) {
-      corpus.edges.partitionsRDD.checkpoint()
-      corpus.vertices.partitionsRDD.checkpoint()
+    if (innerIter % 10 == 0 && sc.getCheckpointDir.isDefined) {
+      val edges = corpus.edges.map(t => t)
+      edges.checkpoint()
+      edges.count()
+      val newCorpus: Graph[VD, ED] = Graph.fromEdges(edges, (zeros(numTopics), None),
+        storageLevel, storageLevel)
+      corpus = updateCounter(newCorpus, numTopics).cache()
     }
     innerIter += 1
 
