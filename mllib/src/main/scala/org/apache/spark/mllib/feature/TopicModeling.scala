@@ -292,7 +292,8 @@ object TopicModeling {
       while (i < topics.length) {
         val oldTopic = topics(i)
         val newTopic = multinomialDistSampler(gen, docTopicCounter.asInstanceOf[BSV[Count]],
-          d, w.asInstanceOf[BSV[Double]], t, d1(oldTopic), w1(oldTopic), t1(oldTopic), oldTopic)
+          d, w.asInstanceOf[BSV[Double]], t.asInstanceOf[BDV[Double]],
+          d1(oldTopic), w1(oldTopic), t1(oldTopic), oldTopic)
         topics(i) = newTopic
         i += 1
       }
@@ -344,45 +345,83 @@ object TopicModeling {
     }
   }
 
-  @inline private[mllib] def multinomialDistSampler(rand: Random, docTopicCounter: BSV[Count],
-    d: BDV[Double], w: BSV[Double], t: BV[Double],
+  @inline private[mllib] def multinomialDistSampler[V](rand: Random, docTopicCounter: BSV[Count],
+    d: BDV[Double], w: BSV[Double], t: BDV[Double],
     d1: Double, w1: Double, t1: Double, currentTopic: Int): Int = {
     val numTopics = d.length
     val tSum = t(numTopics - 1) + t1
     val wSum = w(numTopics - 1) + w1
     val dSum = d(numTopics - 1) + d1
     val distSum = rand.nextDouble() * (tSum + wSum + dSum)
+    var begin = 0
+    var end = numTopics
+    var found = false
+    var mid = (end + begin) >> 1
 
-    var lastDs = 0D
-    var lastWs = 0D
-    var adjustment = 0D
-    var lastReturnedPos = 0
-    var newTopic = numTopics - 1
-
-    if (distSum > tSum + wSum) {
-      docTopicCounter.activeIterator.find { case (index, _) =>
-        val v = d(index)
-        if (index == currentTopic) adjustment = d1 + w1 + t1
-        lastReturnedPos = maxMinIndexSearch(w, index, lastReturnedPos)
-        if (lastReturnedPos > -1) lastWs = w.data(lastReturnedPos)
-        distSum <= v + lastWs + t(index) + adjustment
-      }.foreach(topic => newTopic = topic._1)
-    } else if (distSum > tSum) {
-      w.activeIterator.find { case (index, v) =>
-        if (index == currentTopic) adjustment = d1 + w1 + t1
-        lastReturnedPos = maxMinIndexSearch(docTopicCounter, index, lastReturnedPos)
-        if (lastReturnedPos > -1) lastDs = d(docTopicCounter.index(lastReturnedPos))
-        distSum <= lastDs + v + t(index) + adjustment
-      }.foreach(topic => newTopic = topic._1)
-    } else {
-      t.activeIterator.find { case (index, v) =>
-        if (docTopicCounter(index) > 0D) lastDs = d(index)
-        if (w(index) > 0D) lastWs = w(index)
-        if (index == currentTopic) adjustment = d1 + w1 + t1
-        distSum <= lastDs + lastWs + t(index) + adjustment
-      }.foreach(topic => newTopic = topic._1)
+    def maxD(i: Int) = {
+      val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
+      if (lastReturnedPos > -1) {
+        d(docTopicCounter.index(lastReturnedPos))
+      }
+      else {
+        0D
+      }
     }
-    newTopic
+
+    def maxW(i: Int) = {
+      val lastReturnedPos = maxMinIndexSearch(w, i, -1)
+      if (lastReturnedPos > -1) {
+        w.data(lastReturnedPos)
+      }
+      else {
+        0D
+      }
+    }
+
+    def maxT(i: Int) = {
+      t(i)
+    }
+
+    def index(i: Int) = {
+      val lastDS = maxD(i)
+      val lastWS = maxW(i)
+      val lastTS = maxT(i)
+      if (i >= currentTopic) {
+        lastDS + lastWS + lastTS + d1 + w1 + t1
+      } else {
+        lastDS + lastWS + lastTS
+      }
+    }
+
+    var sum = 0D
+    var isLeft = false
+    while (!found && begin <= end) {
+      sum = index(mid)
+      if (sum < distSum) {
+        isLeft = false
+        begin = mid + 1
+        mid = (end + begin) >> 1
+      }
+      else if (sum > distSum) {
+        isLeft = true
+        end = mid - 1
+        mid = (end + begin) >> 1
+      }
+      else {
+        found = true
+      }
+    }
+    val topic = if (sum < distSum) {
+      mid + 1
+    }
+    else if (isLeft) {
+      mid + 1
+    } else {
+      mid - 1
+    }
+    assert(index(topic) >= distSum)
+    if (topic > 0) assert(index(topic - 1) <= distSum)
+    topic
   }
 
   /**
@@ -401,8 +440,9 @@ object TopicModeling {
       val gen = new java.util.Random(pid)
       var model: TopicModel = null
       if (computedModel != null) model = computedModel.value
-      iter.flatMap { case (docId, doc) =>
-        initializeEdges(gen, doc, docId, numTopics, model)
+      iter.flatMap {
+        case (docId, doc) =>
+          initializeEdges(gen, doc, docId, numTopics, model)
       }
     })
     val corpus: Graph[VD, ED] = Graph.fromEdges(edges, (zeros(numTopics), None),
@@ -417,12 +457,13 @@ object TopicModeling {
     val indices = doc.indices
     val values = doc.values
     if (computedModel == null) {
-      indices.zip(values).map { case (term, counter) =>
-        val topic = new Array[Int](counter.toInt)
-        for (i <- 0 until counter.toInt) {
-          topic(i) = uniformDistSampler(gen, numTopics)
-        }
-        Edge(term, newDocId, topic)
+      indices.zip(values).map {
+        case (term, counter) =>
+          val topic = new Array[Int](counter.toInt)
+          for (i <- 0 until counter.toInt) {
+            topic(i) = uniformDistSampler(gen, numTopics)
+          }
+          Edge(term, newDocId, topic)
       }
     }
     else {
@@ -431,8 +472,9 @@ object TopicModeling {
         topics, numTopics, gen)
       (0 to 2).foreach(t => computedModel.generateTopicDistForDocument(
         docTopicCounter, indices, topics, realTime = false, gen))
-      indices.zip(topics).map { case (term, topic) =>
-        Edge(term, newDocId, topic)
+      indices.zip(topics).map {
+        case (term, topic) =>
+          Edge(term, newDocId, topic)
       }
     }
   }
