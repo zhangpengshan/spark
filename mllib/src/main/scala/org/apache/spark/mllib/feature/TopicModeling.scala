@@ -47,7 +47,7 @@ class TopicModeling private[mllib](
     numTopics: Int,
     alpha: Double,
     beta: Double,
-    storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK,
+    storageLevel: StorageLevel = StorageLevel.DISK_ONLY,
     computedModel: Broadcast[TopicModel] = null) {
     this(initializeCorpus(docs, numTopics, storageLevel, computedModel),
       numTopics, docs.first()._2.size, alpha, beta, storageLevel)
