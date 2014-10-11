@@ -101,7 +101,6 @@ class TopicModeling private[mllib](
     if (innerIter % 10 == 0 && sc.getCheckpointDir.isDefined) {
       val edges = corpus.edges.map(t => t)
       edges.checkpoint()
-      edges.count()
       val newCorpus: Graph[VD, ED] = Graph.fromEdges(edges, (zeros(numTopics), None),
         storageLevel, storageLevel)
       corpus = updateCounter(newCorpus, numTopics).cache()
@@ -196,33 +195,6 @@ class TopicModeling private[mllib](
         (lhs._1 + rhs._1, lhs._2 + rhs._2)
     }
     math.exp(-1 * termProb / totalNum)
-  }
-}
-
-class TopicModelingKryoRegistrator extends KryoRegistrator {
-  def registerClasses(kryo: com.esotericsoftware.kryo.Kryo) {
-    val gkr = new GraphKryoRegistrator
-    gkr.registerClasses(kryo)
-
-    kryo.register(classOf[BSV[TopicModeling.Count]])
-    kryo.register(classOf[BSV[TopicModel.Count]])
-
-    kryo.register(classOf[BV[TopicModeling.Count]])
-    kryo.register(classOf[BV[TopicModel.Count]])
-
-    kryo.register(classOf[BDV[TopicModeling.Count]])
-    kryo.register(classOf[BDV[TopicModel.Count]])
-
-    kryo.register(classOf[SV])
-    kryo.register(classOf[SSV])
-    kryo.register(classOf[SDV])
-
-    kryo.register(classOf[TopicModeling.ED])
-    kryo.register(classOf[TopicModeling.VD])
-
-    kryo.register(classOf[Random])
-    kryo.register(classOf[TopicModeling])
-    kryo.register(classOf[TopicModel])
   }
 }
 
@@ -671,5 +643,32 @@ object TopicModeling {
           Edge(term, newDocId, topic)
       }
     }
+  }
+}
+
+class TopicModelingKryoRegistrator extends KryoRegistrator {
+  def registerClasses(kryo: com.esotericsoftware.kryo.Kryo) {
+    val gkr = new GraphKryoRegistrator
+    gkr.registerClasses(kryo)
+
+    kryo.register(classOf[BSV[TopicModeling.Count]])
+    kryo.register(classOf[BSV[TopicModel.Count]])
+
+    kryo.register(classOf[BV[TopicModeling.Count]])
+    kryo.register(classOf[BV[TopicModel.Count]])
+
+    kryo.register(classOf[BDV[TopicModeling.Count]])
+    kryo.register(classOf[BDV[TopicModel.Count]])
+
+    kryo.register(classOf[SV])
+    kryo.register(classOf[SSV])
+    kryo.register(classOf[SDV])
+
+    kryo.register(classOf[TopicModeling.ED])
+    kryo.register(classOf[TopicModeling.VD])
+
+    kryo.register(classOf[Random])
+    kryo.register(classOf[TopicModeling])
+    kryo.register(classOf[TopicModel])
   }
 }
