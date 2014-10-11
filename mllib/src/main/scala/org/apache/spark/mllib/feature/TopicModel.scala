@@ -152,54 +152,94 @@ class TopicModel private[mllib](
     newDocTopicCounter
   }
 
-
   /**
    * A multinomial distribution sampler, using roulette method to sample an Int back.
    */
-  @inline private def multinomialDistSampler(rand: Random, t: BDV[Double],
+  @inline private[mllib] def multinomialDistSampler(rand: Random, t: BDV[Double],
     w: BSV[Double], d: BSV[Double]): Int = {
+    val numTopics = d.length
     val tSum = t(numTopics - 1)
     val wSum = w(numTopics - 1)
     val dSum = d(numTopics - 1)
     val distSum = rand.nextDouble() * (tSum + wSum + dSum)
-    var lastReturnedPos = 0
-    var lastWsum = 0D
-    var lastDsum = 0D
-    var newTopic = numTopics - 1
-    if (distSum > tSum + wSum) {
-      d.activeIterator.find { case (index, v) =>
-        lastReturnedPos = TopicModeling.maxMinIndexSearch(w, index, lastReturnedPos)
-        if (lastReturnedPos > -1) lastWsum = w.data(lastReturnedPos)
-        distSum <= v + lastWsum + t(index)
-      }.foreach(t => newTopic = t._1)
-    } else if (distSum > tSum) {
-      w.activeIterator.find { case (index, v) =>
-        lastReturnedPos = TopicModeling.maxMinIndexSearch(d, index, lastReturnedPos)
-        if (lastReturnedPos > -1) lastDsum = d.data(lastReturnedPos)
-        distSum <= lastDsum + v + t(index)
-      }.foreach(t => newTopic = t._1)
-    } else {
-      t.activeIterator.find { case (index, v) =>
-        if (w(index) > 0D) lastWsum = w(index)
-        if (d(index) > 0D) lastDsum = d(index)
-        distSum <= lastDsum + lastWsum + v
-      }.foreach(t => newTopic = t._1)
+    var begin = 0
+    var end = numTopics
+    var found = false
+    var mid = (end + begin) >> 1
+
+    def maxMinD(i: Int) = {
+      val lastReturnedPos = TopicModeling.maxMinIndexSearch(d, i, -1)
+      if (lastReturnedPos > -1) {
+        d.data(lastReturnedPos)
+      }
+      else {
+        0D
+      }
     }
 
-    newTopic
+    def maxMinW(i: Int) = {
+      val lastReturnedPos = TopicModeling.maxMinIndexSearch(w, i, -1)
+      if (lastReturnedPos > -1) {
+        w.data(lastReturnedPos)
+      }
+      else {
+        0D
+      }
+    }
+
+    def maxMinT(i: Int) = {
+      t(i)
+    }
+
+    def index(i: Int) = {
+      val lastDS = maxMinD(i)
+      val lastWS = maxMinW(i)
+      val lastTS = maxMinT(i)
+      lastDS + lastWS + lastTS
+    }
+
+    var sum = 0D
+    var isLeft = false
+    while (!found && begin <= end) {
+      sum = index(mid)
+      if (sum < distSum) {
+        isLeft = false
+        begin = mid + 1
+        mid = (end + begin) >> 1
+      }
+      else if (sum > distSum) {
+        isLeft = true
+        end = mid - 1
+        mid = (end + begin) >> 1
+      }
+      else {
+        found = true
+      }
+    }
+    val topic = if (sum < distSum) {
+      mid + 1
+    }
+    else if (isLeft) {
+      mid + 1
+    } else {
+      mid - 1
+    }
+    assert(index(topic) >= distSum)
+    if (topic > 0) assert(index(topic - 1) <= distSum)
+    topic
   }
 
   @inline private def d(docTopicCounter: BV[Count], term: Int): BSV[Double] = {
-    val t = BSV.zeros[Double](numTopics)
+    val d = BSV.zeros[Double](numTopics)
     var lastSum = 0D
     docTopicCounter.activeIterator.filter(_._2 > 0).foreach { case (topic, cn) =>
-      t(topic) = cn * (_topicTermCounter(term)(topic) + beta) /
+      d(topic) = cn * (_topicTermCounter(term)(topic) + beta) /
         (_topicCounter(topic) + (numTerms * beta))
-      lastSum = t(topic) + lastSum
-      t(topic) = lastSum
+      lastSum = d(topic) + lastSum
+      d(topic) = lastSum
     }
-    t(numTopics - 1) = lastSum
-    t
+    d(numTopics - 1) = lastSum
+    d
   }
 
   @transient private lazy val t = {

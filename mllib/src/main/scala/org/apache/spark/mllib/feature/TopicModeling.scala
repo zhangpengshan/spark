@@ -32,6 +32,196 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.KryoRegistrator
 import org.apache.spark.storage.StorageLevel
 
+import TopicModeling._
+
+class TopicModeling private[mllib](
+  @transient var corpus: Graph[VD, ED],
+  val numTopics: Int,
+  val numTerms: Int,
+  val alpha: Double,
+  val beta: Double,
+  @transient val storageLevel: StorageLevel)
+  extends Serializable with Logging {
+
+  def this(docs: RDD[(TopicModeling.DocId, SSV)],
+    numTopics: Int,
+    alpha: Double,
+    beta: Double,
+    storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK,
+    computedModel: Broadcast[TopicModel] = null) {
+    this(initializeCorpus(docs, numTopics, storageLevel, computedModel),
+      numTopics, docs.first()._2.size, alpha, beta, storageLevel)
+  }
+
+
+  /**
+   * The number of documents in the corpus
+   */
+  val numDocs = docVertices.count()
+
+  /**
+   * The number of terms in the corpus
+   */
+  private val sumTerms = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
+
+  /**
+   * The total counts for each topic
+   */
+  @transient private var globalTopicCounter: BV[Count] = collectGlobalCounter(corpus, numTopics)
+  assert(brzSum(globalTopicCounter) == sumTerms)
+  @transient private val sc = corpus.vertices.context
+  @transient private val seed = new Random().nextInt()
+  @transient private var innerIter = 1
+  @transient private var cachedEdges: EdgeRDD[ED, VD] = null
+  @transient private var cachedVertices: VertexRDD[VD] = null
+
+  private def termVertices = corpus.vertices.filter(t => t._1 >= 0)
+
+  private def docVertices = corpus.vertices.filter(t => t._1 < 0)
+
+  private def gibbsSampling(cachedEdges: EdgeRDD[ED, VD],
+    cachedVertices: VertexRDD[VD]): (EdgeRDD[ED, VD], VertexRDD[VD]) = {
+
+    val corpusTopicDist = collectTermTopicDist(corpus, globalTopicCounter,
+      sumTerms, numTerms, numTopics, alpha, beta)
+
+    val corpusSampleTopics = sampleTopics(corpusTopicDist, globalTopicCounter,
+      sumTerms, innerIter + seed, numTerms, numTopics, alpha, beta)
+    corpusSampleTopics.edges.setName(s"edges-$innerIter").cache().count()
+    Option(cachedEdges).foreach(_.unpersist())
+    val edges = corpusSampleTopics.edges
+
+    corpus = updateCounter(corpusSampleTopics, numTopics)
+    corpus.vertices.setName(s"vertices-$innerIter").cache()
+    globalTopicCounter = collectGlobalCounter(corpus, numTopics)
+    assert(brzSum(globalTopicCounter) == sumTerms)
+    Option(cachedVertices).foreach(_.unpersist())
+    val vertices = corpus.vertices
+
+    if (innerIter % 5 == 0 && sc.getCheckpointDir.isDefined) {
+      corpus.edges.partitionsRDD.checkpoint()
+      corpus.vertices.partitionsRDD.checkpoint()
+    }
+    innerIter += 1
+
+    (edges, vertices)
+  }
+
+  def saveTopicModel(burnInIter: Int): TopicModel = {
+    val topicModel = TopicModel(numTopics, numTerms, alpha, beta)
+    for (iter <- 1 to burnInIter) {
+      logInfo("Save TopicModel (Iteration %d/%d)".format(iter, burnInIter))
+      val cached = gibbsSampling(cachedEdges, cachedVertices)
+      cachedEdges = cached._1
+      cachedVertices = cached._2
+      updateTopicModel(termVertices, topicModel)
+    }
+    topicModel._topicCounter :/= burnInIter.toDouble
+    topicModel._topicTermCounter.foreach(_ :/= burnInIter.toDouble)
+    topicModel
+  }
+
+  def runGibbsSampling(iterations: Int): Unit = {
+    for (iter <- 1 to iterations) {
+      logInfo("Start Gibbs sampling (Iteration %d/%d)".format(iter, iterations))
+      val cached = gibbsSampling(cachedEdges, cachedVertices)
+      cachedEdges = cached._1
+      cachedVertices = cached._2
+    }
+  }
+
+  @Experimental
+  def mergeDuplicateTopic(threshold: Double = 0.95D): Map[Int, Int] = {
+    val rows = termVertices.map(t => t._2._1).map { v =>
+      val bsv = v.asInstanceOf[BSV[Count]]
+      val length = bsv.length
+      val index = bsv.index.slice(0, bsv.used)
+      val data = bsv.data.slice(0, bsv.used).map(_.toDouble)
+      new SSV(length, index, data).asInstanceOf[SV]
+    }
+    val simMatrix = new RowMatrix(rows).columnSimilarities()
+    val minMap = simMatrix.entries.filter { case MatrixEntry(row, column, sim) =>
+      sim > threshold && row != column
+    }.map { case MatrixEntry(row, column, sim) =>
+      (column.toInt, row.toInt)
+    }.groupByKey().map { case (topic, simTopics) =>
+      (topic, simTopics.min)
+    }.collect().toMap
+    if (minMap.size > 0) {
+      corpus = corpus.mapEdges(edges => {
+        edges.attr.map { topic =>
+          minMap.get(topic).getOrElse(topic)
+        }
+      })
+      corpus = updateCounter(corpus, numTopics)
+    }
+    minMap
+  }
+
+  def perplexity(): Double = {
+    val totalTopicCounter = this.globalTopicCounter
+    val numTopics = this.numTopics
+    val numTerms = this.numTerms
+    val alpha = this.alpha
+    val beta = this.beta
+
+    val newCounts = corpus.mapReduceTriplets[Int](triplet => {
+      val size = triplet.attr.size
+      val docId = triplet.dstId
+      val wordId = triplet.srcId
+      Iterator((docId, size), (wordId, size))
+    }, (a, b) => a + b)
+    val (termProb, totalNum) = corpus.outerJoinVertices(newCounts) {
+      (_, f, n) =>
+        (f._1, n.get)
+    }.mapTriplets {
+      triplet =>
+        val (termCounter, _) = triplet.srcAttr
+        val (docTopicCounter, docTopicCount) = triplet.dstAttr
+        var probWord = 0D
+        val size = triplet.attr.size
+        (0 until numTopics).foreach {
+          topic =>
+            val phi = (termCounter(topic) + beta) / (totalTopicCounter(topic) + numTerms * beta)
+            val theta = (docTopicCounter(topic) + alpha) / (docTopicCount + alpha * numTopics)
+            probWord += phi * theta
+        }
+        (Math.log(probWord * size) * size, size)
+    }.edges.map(t => t.attr).reduce {
+      (lhs, rhs) =>
+        (lhs._1 + rhs._1, lhs._2 + rhs._2)
+    }
+    math.exp(-1 * termProb / totalNum)
+  }
+}
+
+class TopicModelingKryoRegistrator extends KryoRegistrator {
+  def registerClasses(kryo: com.esotericsoftware.kryo.Kryo) {
+    val gkr = new GraphKryoRegistrator
+    gkr.registerClasses(kryo)
+
+    kryo.register(classOf[BSV[TopicModeling.Count]])
+    kryo.register(classOf[BSV[TopicModel.Count]])
+
+    kryo.register(classOf[BV[TopicModeling.Count]])
+    kryo.register(classOf[BV[TopicModel.Count]])
+
+    kryo.register(classOf[BDV[TopicModeling.Count]])
+    kryo.register(classOf[BDV[TopicModel.Count]])
+
+    kryo.register(classOf[SV])
+    kryo.register(classOf[SSV])
+    kryo.register(classOf[SDV])
+
+    kryo.register(classOf[TopicModeling.ED])
+    kryo.register(classOf[TopicModeling.VD])
+
+    kryo.register(classOf[Random])
+    kryo.register(classOf[TopicModeling])
+    kryo.register(classOf[TopicModel])
+  }
+}
+
 object TopicModeling {
 
   type DocId = VertexId
@@ -358,7 +548,7 @@ object TopicModeling {
     var found = false
     var mid = (end + begin) >> 1
 
-    def maxD(i: Int) = {
+    def maxMinD(i: Int) = {
       val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
       if (lastReturnedPos > -1) {
         d(docTopicCounter.index(lastReturnedPos))
@@ -368,7 +558,7 @@ object TopicModeling {
       }
     }
 
-    def maxW(i: Int) = {
+    def maxMinW(i: Int) = {
       val lastReturnedPos = maxMinIndexSearch(w, i, -1)
       if (lastReturnedPos > -1) {
         w.data(lastReturnedPos)
@@ -378,14 +568,14 @@ object TopicModeling {
       }
     }
 
-    def maxT(i: Int) = {
+    def maxMinT(i: Int) = {
       t(i)
     }
 
     def index(i: Int) = {
-      val lastDS = maxD(i)
-      val lastWS = maxW(i)
-      val lastTS = maxT(i)
+      val lastDS = maxMinD(i)
+      val lastWS = maxMinW(i)
+      val lastTS = maxMinT(i)
       if (i >= currentTopic) {
         lastDS + lastWS + lastTS + d1 + w1 + t1
       } else {
@@ -477,195 +667,5 @@ object TopicModeling {
           Edge(term, newDocId, topic)
       }
     }
-  }
-}
-
-import TopicModeling._
-
-class TopicModeling private[mllib](
-  @transient var corpus: Graph[VD, ED],
-  val numTopics: Int,
-  val numTerms: Int,
-  val alpha: Double,
-  val beta: Double,
-  @transient val storageLevel: StorageLevel)
-  extends Serializable with Logging {
-
-  def this(docs: RDD[(TopicModeling.DocId, SSV)],
-    numTopics: Int,
-    alpha: Double,
-    beta: Double,
-    storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK,
-    computedModel: Broadcast[TopicModel] = null) {
-    this(initializeCorpus(docs, numTopics, storageLevel, computedModel),
-      numTopics, docs.first()._2.size, alpha, beta, storageLevel)
-  }
-
-
-  /**
-   * The number of documents in the corpus
-   */
-  val numDocs = docVertices.count()
-
-  /**
-   * The number of terms in the corpus
-   */
-  private val sumTerms = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
-
-  /**
-   * The total counts for each topic
-   */
-  @transient private var globalTopicCounter: BV[Count] = collectGlobalCounter(corpus, numTopics)
-  assert(brzSum(globalTopicCounter) == sumTerms)
-  @transient private val sc = corpus.vertices.context
-  @transient private val seed = new Random().nextInt()
-  @transient private var innerIter = 1
-  @transient private var cachedEdges: EdgeRDD[ED, VD] = null
-  @transient private var cachedVertices: VertexRDD[VD] = null
-
-  private def termVertices = corpus.vertices.filter(t => t._1 >= 0)
-
-  private def docVertices = corpus.vertices.filter(t => t._1 < 0)
-
-  private def gibbsSampling(cachedEdges: EdgeRDD[ED, VD],
-    cachedVertices: VertexRDD[VD]): (EdgeRDD[ED, VD], VertexRDD[VD]) = {
-
-    val corpusTopicDist = collectTermTopicDist(corpus, globalTopicCounter,
-      sumTerms, numTerms, numTopics, alpha, beta)
-
-    val corpusSampleTopics = sampleTopics(corpusTopicDist, globalTopicCounter,
-      sumTerms, innerIter + seed, numTerms, numTopics, alpha, beta)
-    corpusSampleTopics.edges.setName(s"edges-$innerIter").cache().count()
-    Option(cachedEdges).foreach(_.unpersist())
-    val edges = corpusSampleTopics.edges
-
-    corpus = updateCounter(corpusSampleTopics, numTopics)
-    corpus.vertices.setName(s"vertices-$innerIter").cache()
-    globalTopicCounter = collectGlobalCounter(corpus, numTopics)
-    assert(brzSum(globalTopicCounter) == sumTerms)
-    Option(cachedVertices).foreach(_.unpersist())
-    val vertices = corpus.vertices
-
-    if (innerIter % 5 == 0 && sc.getCheckpointDir.isDefined) {
-      corpus.edges.partitionsRDD.checkpoint()
-      corpus.vertices.partitionsRDD.checkpoint()
-    }
-    innerIter += 1
-
-    (edges, vertices)
-  }
-
-  def saveTopicModel(burnInIter: Int): TopicModel = {
-    val topicModel = TopicModel(numTopics, numTerms, alpha, beta)
-    for (iter <- 1 to burnInIter) {
-      logInfo("Save TopicModel (Iteration %d/%d)".format(iter, burnInIter))
-      val cached = gibbsSampling(cachedEdges, cachedVertices)
-      cachedEdges = cached._1
-      cachedVertices = cached._2
-      updateTopicModel(termVertices, topicModel)
-    }
-    topicModel._topicCounter :/= burnInIter.toDouble
-    topicModel._topicTermCounter.foreach(_ :/= burnInIter.toDouble)
-    topicModel
-  }
-
-  def runGibbsSampling(iterations: Int): Unit = {
-    for (iter <- 1 to iterations) {
-      logInfo("Start Gibbs sampling (Iteration %d/%d)".format(iter, iterations))
-      val cached = gibbsSampling(cachedEdges, cachedVertices)
-      cachedEdges = cached._1
-      cachedVertices = cached._2
-    }
-  }
-
-  @Experimental
-  def mergeDuplicateTopic(threshold: Double = 0.95D): Map[Int, Int] = {
-    val rows = termVertices.map(t => t._2._1).map { v =>
-      val bsv = v.asInstanceOf[BSV[Count]]
-      val length = bsv.length
-      val index = bsv.index.slice(0, bsv.used)
-      val data = bsv.data.slice(0, bsv.used).map(_.toDouble)
-      new SSV(length, index, data).asInstanceOf[SV]
-    }
-    val simMatrix = new RowMatrix(rows).columnSimilarities()
-    val minMap = simMatrix.entries.filter { case MatrixEntry(row, column, sim) =>
-      sim > threshold && row != column
-    }.map { case MatrixEntry(row, column, sim) =>
-      (column.toInt, row.toInt)
-    }.groupByKey().map { case (topic, simTopics) =>
-      (topic, simTopics.min)
-    }.collect().toMap
-    if (minMap.size > 0) {
-      corpus = corpus.mapEdges(edges => {
-        edges.attr.map { topic =>
-          minMap.get(topic).getOrElse(topic)
-        }
-      })
-      corpus = updateCounter(corpus, numTopics)
-    }
-    minMap
-  }
-
-  def perplexity(): Double = {
-    val totalTopicCounter = this.globalTopicCounter
-    val numTopics = this.numTopics
-    val numTerms = this.numTerms
-    val alpha = this.alpha
-    val beta = this.beta
-
-    val newCounts = corpus.mapReduceTriplets[Int](triplet => {
-      val size = triplet.attr.size
-      val docId = triplet.dstId
-      val wordId = triplet.srcId
-      Iterator((docId, size), (wordId, size))
-    }, (a, b) => a + b)
-    val (termProb, totalNum) = corpus.outerJoinVertices(newCounts) {
-      (_, f, n) =>
-        (f._1, n.get)
-    }.mapTriplets {
-      triplet =>
-        val (termCounter, _) = triplet.srcAttr
-        val (docTopicCounter, docTopicCount) = triplet.dstAttr
-        var probWord = 0D
-        val size = triplet.attr.size
-        (0 until numTopics).foreach {
-          topic =>
-            val phi = (termCounter(topic) + beta) / (totalTopicCounter(topic) + numTerms * beta)
-            val theta = (docTopicCounter(topic) + alpha) / (docTopicCount + alpha * numTopics)
-            probWord += phi * theta
-        }
-        (Math.log(probWord * size) * size, size)
-    }.edges.map(t => t.attr).reduce {
-      (lhs, rhs) =>
-        (lhs._1 + rhs._1, lhs._2 + rhs._2)
-    }
-    math.exp(-1 * termProb / totalNum)
-  }
-}
-
-class TopicModelingKryoRegistrator extends KryoRegistrator {
-  def registerClasses(kryo: com.esotericsoftware.kryo.Kryo) {
-    val gkr = new GraphKryoRegistrator
-    gkr.registerClasses(kryo)
-
-    kryo.register(classOf[BSV[TopicModeling.Count]])
-    kryo.register(classOf[BSV[TopicModel.Count]])
-
-    kryo.register(classOf[BV[TopicModeling.Count]])
-    kryo.register(classOf[BV[TopicModel.Count]])
-
-    kryo.register(classOf[BDV[TopicModeling.Count]])
-    kryo.register(classOf[BDV[TopicModel.Count]])
-
-    kryo.register(classOf[SV])
-    kryo.register(classOf[SSV])
-    kryo.register(classOf[SDV])
-
-    kryo.register(classOf[TopicModeling.ED])
-    kryo.register(classOf[TopicModeling.VD])
-
-    kryo.register(classOf[Random])
-    kryo.register(classOf[TopicModeling])
-    kryo.register(classOf[TopicModel])
   }
 }
