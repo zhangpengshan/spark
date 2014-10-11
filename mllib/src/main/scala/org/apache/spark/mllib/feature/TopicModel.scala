@@ -152,56 +152,53 @@ class TopicModel private[mllib](
     newDocTopicCounter
   }
 
+  @inline private def maxMinD(i: Int, d: BSV[Double]) = {
+    val lastReturnedPos = TopicModeling.maxMinIndexSearch(d, i, -1)
+    if (lastReturnedPos > -1) {
+      d.data(lastReturnedPos)
+    }
+    else {
+      0D
+    }
+  }
+
+  @inline private def maxMinW(i: Int, w: BSV[Double]) = {
+    val lastReturnedPos = TopicModeling.maxMinIndexSearch(w, i, -1)
+    if (lastReturnedPos > -1) {
+      w.data(lastReturnedPos)
+    }
+    else {
+      0D
+    }
+  }
+
+  @inline private def maxMinT(i: Int, t: BDV[Double]) = {
+    t(i)
+  }
+
+  @inline private def index(i: Int, t: BDV[Double], w: BSV[Double], d: BSV[Double]) = {
+    val lastDS = maxMinD(i, d)
+    val lastWS = maxMinW(i, w)
+    val lastTS = maxMinT(i, t)
+    lastDS + lastWS + lastTS
+  }
+
   /**
    * A multinomial distribution sampler, using roulette method to sample an Int back.
    */
-  @inline private[mllib] def multinomialDistSampler(rand: Random, t: BDV[Double],
+  @inline private def multinomialDistSampler(rand: Random, t: BDV[Double],
     w: BSV[Double], d: BSV[Double]): Int = {
     val numTopics = d.length
-    val tSum = t(numTopics - 1)
-    val wSum = w(numTopics - 1)
-    val dSum = d(numTopics - 1)
-    val distSum = rand.nextDouble() * (tSum + wSum + dSum)
+    val distSum = rand.nextDouble() * (t(numTopics - 1) + w(numTopics - 1) + d(numTopics - 1))
+
     var begin = 0
     var end = numTopics
     var found = false
     var mid = (end + begin) >> 1
-
-    def maxMinD(i: Int) = {
-      val lastReturnedPos = TopicModeling.maxMinIndexSearch(d, i, -1)
-      if (lastReturnedPos > -1) {
-        d.data(lastReturnedPos)
-      }
-      else {
-        0D
-      }
-    }
-
-    def maxMinW(i: Int) = {
-      val lastReturnedPos = TopicModeling.maxMinIndexSearch(w, i, -1)
-      if (lastReturnedPos > -1) {
-        w.data(lastReturnedPos)
-      }
-      else {
-        0D
-      }
-    }
-
-    def maxMinT(i: Int) = {
-      t(i)
-    }
-
-    def index(i: Int) = {
-      val lastDS = maxMinD(i)
-      val lastWS = maxMinW(i)
-      val lastTS = maxMinT(i)
-      lastDS + lastWS + lastTS
-    }
-
     var sum = 0D
     var isLeft = false
     while (!found && begin <= end) {
-      sum = index(mid)
+      sum = index(mid, t, w, d)
       if (sum < distSum) {
         isLeft = false
         begin = mid + 1
@@ -224,8 +221,8 @@ class TopicModel private[mllib](
     } else {
       mid - 1
     }
-    assert(index(topic) >= distSum)
-    if (topic > 0) assert(index(topic - 1) <= distSum)
+    assert(index(topic, t, w, d) >= distSum)
+    if (topic > 0) assert(index(topic - 1, t, w, d) <= distSum)
     topic
   }
 

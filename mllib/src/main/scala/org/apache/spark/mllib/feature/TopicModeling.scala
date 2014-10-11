@@ -511,58 +511,59 @@ object TopicModeling {
     }
   }
 
-  @inline private[mllib] def multinomialDistSampler[V](rand: Random, docTopicCounter: BSV[Count],
+  @inline private def maxMinD(i: Int, docTopicCounter: BSV[Count], d: BDV[Double]) = {
+    val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
+    if (lastReturnedPos > -1) {
+      d(docTopicCounter.index(lastReturnedPos))
+    }
+    else {
+      0D
+    }
+  }
+
+  @inline private def maxMinW(i: Int, w: BSV[Double]) = {
+    val lastReturnedPos = maxMinIndexSearch(w, i, -1)
+    if (lastReturnedPos > -1) {
+      w.data(lastReturnedPos)
+    }
+    else {
+      0D
+    }
+  }
+
+  @inline private def maxMinT(i: Int, t: BDV[Double]) = {
+    t(i)
+  }
+
+  @inline private def index(i: Int, docTopicCounter: BSV[Count],
+    d: BDV[Double], w: BSV[Double], t: BDV[Double],
+    d1: Double, w1: Double, t1: Double, currentTopic: Int) = {
+    val lastDS = maxMinD(i, docTopicCounter, d)
+    val lastWS = maxMinW(i, w)
+    val lastTS = maxMinT(i, t)
+    if (i >= currentTopic) {
+      lastDS + lastWS + lastTS + d1 + w1 + t1
+    } else {
+      lastDS + lastWS + lastTS
+    }
+  }
+
+  @inline private def multinomialDistSampler[V](rand: Random, docTopicCounter: BSV[Count],
     d: BDV[Double], w: BSV[Double], t: BDV[Double],
     d1: Double, w1: Double, t1: Double, currentTopic: Int): Int = {
     val numTopics = d.length
-    val tSum = t(numTopics - 1) + t1
-    val wSum = w(numTopics - 1) + w1
-    val dSum = d(numTopics - 1) + d1
-    val distSum = rand.nextDouble() * (tSum + wSum + dSum)
+    val distSum = rand.nextDouble() * (t(numTopics - 1) + t1 +
+      w(numTopics - 1) + w1 + d(numTopics - 1) + d1)
+
     var begin = 0
     var end = numTopics
     var found = false
     var mid = (end + begin) >> 1
-
-    def maxMinD(i: Int) = {
-      val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
-      if (lastReturnedPos > -1) {
-        d(docTopicCounter.index(lastReturnedPos))
-      }
-      else {
-        0D
-      }
-    }
-
-    def maxMinW(i: Int) = {
-      val lastReturnedPos = maxMinIndexSearch(w, i, -1)
-      if (lastReturnedPos > -1) {
-        w.data(lastReturnedPos)
-      }
-      else {
-        0D
-      }
-    }
-
-    def maxMinT(i: Int) = {
-      t(i)
-    }
-
-    def index(i: Int) = {
-      val lastDS = maxMinD(i)
-      val lastWS = maxMinW(i)
-      val lastTS = maxMinT(i)
-      if (i >= currentTopic) {
-        lastDS + lastWS + lastTS + d1 + w1 + t1
-      } else {
-        lastDS + lastWS + lastTS
-      }
-    }
-
     var sum = 0D
     var isLeft = false
+
     while (!found && begin <= end) {
-      sum = index(mid)
+      sum = index(mid, docTopicCounter, d, w, t, d1, w1, t1, currentTopic)
       if (sum < distSum) {
         isLeft = false
         begin = mid + 1
@@ -585,8 +586,12 @@ object TopicModeling {
     } else {
       mid - 1
     }
-    assert(index(topic) >= distSum)
-    if (topic > 0) assert(index(topic - 1) <= distSum)
+
+    assert(index(topic, docTopicCounter, d, w, t, d1, w1, t1, currentTopic) >= distSum)
+    if (topic > 0) {
+      assert(index(topic - 1, docTopicCounter, d, w, t, d1, w1, t1, currentTopic) <= distSum)
+    }
+
     topic
   }
 
