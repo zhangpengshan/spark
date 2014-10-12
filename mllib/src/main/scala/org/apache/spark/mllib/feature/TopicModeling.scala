@@ -21,16 +21,16 @@ import java.util.Random
 
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, sum => brzSum}
 
-import org.apache.spark.Logging
-import org.apache.spark.SparkContext._
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.graphx._
+import org.apache.spark.Logging
 import org.apache.spark.mllib.linalg.distributed.{MatrixEntry, RowMatrix}
 import org.apache.spark.mllib.linalg.{DenseVector => SDV, SparseVector => SSV, Vector => SV}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.KryoRegistrator
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.SparkContext._
 
 import TopicModeling._
 
@@ -72,8 +72,9 @@ class TopicModeling private[mllib](
   @transient private val sc = corpus.vertices.context
   @transient private val seed = new Random().nextInt()
   @transient private var innerIter = 1
-  @transient private var cachedEdges: EdgeRDD[ED, VD] = null
-  @transient private var cachedVertices: VertexRDD[VD] = null
+
+  @transient private var cachedEdges: EdgeRDD[ED, VD] = corpus.edges
+  @transient private var cachedVertices: VertexRDD[VD] = corpus.vertices
 
   private def termVertices = corpus.vertices.filter(t => t._1 >= 0)
 
@@ -283,53 +284,49 @@ object TopicModeling {
     numTopics: Int,
     alpha: Double,
     beta: Double): Graph[VD, ED] = {
-    graph.mapVertices[VD]((vertexId, counter) => {
-      if (vertexId >= 0) {
-        val termTopicCounter = counter.counter
-        termTopicCounter.compact()
-        val length = termTopicCounter.length
-        val used = termTopicCounter.used
-        val index = termTopicCounter.index
-        val data = termTopicCounter.data
+    val newVD = graph.vertices.filter(_._1 >= 0).map { v =>
+      val vertexId = v._1
+      val termTopicCounter = v._2.counter
+      termTopicCounter.compact()
+      val length = termTopicCounter.length
+      val used = termTopicCounter.used
+      val index = termTopicCounter.index
+      val data = termTopicCounter.data
+      val w = new Array[Double](used)
+      val w1 = new Array[Double](used)
 
-        val w = new Array[Double](used)
-        val w1 = new Array[Double](used)
+      var wi = 0D
+      var i = 0
 
-        var wi = 0D
-        var i = 0
+      while (i < used) {
+        val topic = index(i)
+        val count = data(i)
+        var adjustment = 0D
+        val alphaAS = alpha
 
-        while (i < used) {
-          val topic = index(i)
-          val count = data(i)
-          var adjustment = 0D
-          val alphaAS = alpha
+        w(i) = count * ((totalTopicCounter(topic) * (alpha * numTopics)) +
+          (alpha * numTopics) * (adjustment + alphaAS) +
+          adjustment * (sumTerms - 1 + (alphaAS * numTopics))) /
+          (totalTopicCounter(topic) + (numTerms * beta)) /
+          (sumTerms - 1 + (alphaAS * numTopics))
 
-          w(i) = count * ((totalTopicCounter(topic) * (alpha * numTopics)) +
-            (alpha * numTopics) * (adjustment + alphaAS) +
-            adjustment * (sumTerms - 1 + (alphaAS * numTopics))) /
-            (totalTopicCounter(topic) + (numTerms * beta)) /
-            (sumTerms - 1 + (alphaAS * numTopics))
+        adjustment = -1D
+        w1(i) = count * ((totalTopicCounter(topic) * (alpha * numTopics)) +
+          (alpha * numTopics) * (adjustment + alphaAS) +
+          adjustment * (sumTerms - 1 + (alphaAS * numTopics))) /
+          (totalTopicCounter(topic) + (numTerms * beta)) /
+          (sumTerms - 1 + (alphaAS * numTopics))
 
-          adjustment = -1D
-          w1(i) = count * ((totalTopicCounter(topic) * (alpha * numTopics)) +
-            (alpha * numTopics) * (adjustment + alphaAS) +
-            adjustment * (sumTerms - 1 + (alphaAS * numTopics))) /
-            (totalTopicCounter(topic) + (numTerms * beta)) /
-            (sumTerms - 1 + (alphaAS * numTopics))
-
-          w1(i) = w1(i) - w(i)
-          wi = w(i) + wi
-          w(i) = wi
-          i += 1
-        }
-        VD(termTopicCounter, new BSV[Double](index, w, used, length),
-          new BSV[Double](index, w1, used, length))
+        w1(i) = w1(i) - w(i)
+        wi = w(i) + wi
+        w(i) = wi
+        i += 1
       }
-      else {
-        counter.counter.compact
-        counter
-      }
-    })
+      val vd = VD(termTopicCounter, new BSV[Double](index, w, used, length),
+        new BSV[Double](index, w1, used, length))
+      (vertexId, vd)
+    }
+    graph.joinVertices(newVD)((_, _, nvd) => nvd)
   }
 
   @inline private def collectDocTopicDist(
@@ -456,9 +453,9 @@ object TopicModeling {
 
       var i = 0
       while (i < topics.length) {
-        val oldTopic = topics(i)
+        val currentTopic = topics(i)
         val newTopic = multinomialDistSampler(gen, docTopicCounter, d, w, t,
-          d1(oldTopic), w1(oldTopic), t1(oldTopic), oldTopic)
+          d1(currentTopic), w1(currentTopic), t1(currentTopic), currentTopic)
         topics(i) = newTopic
         i += 1
       }
@@ -502,10 +499,10 @@ object TopicModeling {
   }
 
   private def updateTopicModel(termVertices: VertexRDD[VD], topicModel: TopicModel): Unit = {
-    termVertices.map(t => (t._1.toInt, t._2.counter)).
-      collect().foreach { case (term, ttc) =>
-      ttc.activeIterator.foreach { case (topic, inc) =>
-        topicModel.update(term, topic, inc)
+    termVertices.map(t => (t._1.toInt, t._2.counter)).collect().foreach { case (term, ttc) =>
+      ttc.activeIterator.foreach {
+        case (topic, inc) =>
+          topicModel.update(term, topic, inc)
       }
     }
   }
@@ -615,9 +612,11 @@ object TopicModeling {
           initializeEdges(gen, doc, docId, numTopics, model)
       }
     })
-    val corpus: Graph[VD, ED] = Graph.fromEdges(edges, null,
-      storageLevel, storageLevel)
-    updateCounter(corpus, numTopics).cache()
+    var corpus: Graph[VD, ED] = Graph.fromEdges(edges, null, storageLevel, storageLevel)
+    corpus.partitionBy(PartitionStrategy.EdgePartition1D)
+    corpus = updateCounter(corpus, numTopics).cache()
+    corpus.vertices.count()
+    corpus
   }
 
   private def initializeEdges(gen: Random, doc: SSV, docId: DocId, numTopics: Int,
