@@ -19,7 +19,7 @@ package org.apache.spark.mllib.feature
 
 import java.util.Random
 
-import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV, sum => brzSum}
+import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, sum => brzSum}
 
 import org.apache.spark.Logging
 import org.apache.spark.SparkContext._
@@ -47,7 +47,7 @@ class TopicModeling private[mllib](
     numTopics: Int,
     alpha: Double,
     beta: Double,
-    storageLevel: StorageLevel = StorageLevel.DISK_ONLY,
+    storageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK,
     computedModel: Broadcast[TopicModel] = null) {
     this(initializeCorpus(docs, numTopics, storageLevel, computedModel),
       numTopics, docs.first()._2.size, alpha, beta, storageLevel)
@@ -67,7 +67,7 @@ class TopicModeling private[mllib](
   /**
    * The total counts for each topic
    */
-  @transient private var globalTopicCounter: BV[Count] = collectGlobalCounter(corpus, numTopics)
+  @transient private var globalTopicCounter: BDV[Count] = collectGlobalCounter(corpus, numTopics)
   assert(brzSum(globalTopicCounter) == sumTerms)
   @transient private val sc = corpus.vertices.context
   @transient private val seed = new Random().nextInt()
@@ -79,9 +79,17 @@ class TopicModeling private[mllib](
 
   private def docVertices = corpus.vertices.filter(t => t._1 < 0)
 
-  private def gibbsSampling(cachedEdges: EdgeRDD[ED, VD],
-    cachedVertices: VertexRDD[VD]): (EdgeRDD[ED, VD], VertexRDD[VD]) = {
+  private def checkpoint(): Unit = {
+    if (innerIter % 10 == 0 && sc.getCheckpointDir.isDefined) {
+      val edges = corpus.edges.map(t => t)
+      edges.checkpoint()
+      val newCorpus: Graph[VD, ED] = Graph.fromEdges(edges, null,
+        storageLevel, storageLevel)
+      corpus = updateCounter(newCorpus, numTopics).cache()
+    }
+  }
 
+  private def gibbsSampling(): Unit = {
     val corpusTopicDist = collectTermTopicDist(corpus, globalTopicCounter,
       sumTerms, numTerms, numTopics, alpha, beta)
 
@@ -89,34 +97,24 @@ class TopicModeling private[mllib](
       sumTerms, innerIter + seed, numTerms, numTopics, alpha, beta)
     corpusSampleTopics.edges.setName(s"edges-$innerIter").cache().count()
     Option(cachedEdges).foreach(_.unpersist())
-    val edges = corpusSampleTopics.edges
+    cachedEdges = corpusSampleTopics.edges
 
     corpus = updateCounter(corpusSampleTopics, numTopics)
     corpus.vertices.setName(s"vertices-$innerIter").cache()
     globalTopicCounter = collectGlobalCounter(corpus, numTopics)
     assert(brzSum(globalTopicCounter) == sumTerms)
     Option(cachedVertices).foreach(_.unpersist())
-    val vertices = corpus.vertices
+    cachedVertices = corpus.vertices
 
-    if (innerIter % 10 == 0 && sc.getCheckpointDir.isDefined) {
-      val edges = corpus.edges.map(t => t)
-      edges.checkpoint()
-      val newCorpus: Graph[VD, ED] = Graph.fromEdges(edges, (zeros(numTopics), None),
-        storageLevel, storageLevel)
-      corpus = updateCounter(newCorpus, numTopics).cache()
-    }
+    checkpoint()
     innerIter += 1
-
-    (edges, vertices)
   }
 
   def saveTopicModel(burnInIter: Int): TopicModel = {
     val topicModel = TopicModel(numTopics, numTerms, alpha, beta)
     for (iter <- 1 to burnInIter) {
       logInfo("Save TopicModel (Iteration %d/%d)".format(iter, burnInIter))
-      val cached = gibbsSampling(cachedEdges, cachedVertices)
-      cachedEdges = cached._1
-      cachedVertices = cached._2
+      gibbsSampling()
       updateTopicModel(termVertices, topicModel)
     }
     topicModel._topicCounter :/= burnInIter.toDouble
@@ -127,19 +125,17 @@ class TopicModeling private[mllib](
   def runGibbsSampling(iterations: Int): Unit = {
     for (iter <- 1 to iterations) {
       logInfo("Start Gibbs sampling (Iteration %d/%d)".format(iter, iterations))
-      val cached = gibbsSampling(cachedEdges, cachedVertices)
-      cachedEdges = cached._1
-      cachedVertices = cached._2
+      gibbsSampling()
     }
   }
 
   @Experimental
   def mergeDuplicateTopic(threshold: Double = 0.95D): Map[Int, Int] = {
-    val rows = termVertices.map(t => t._2._1).map { v =>
-      val bsv = v.asInstanceOf[BSV[Count]]
+    val rows = termVertices.map(t => t._2.counter).map { bsv =>
       val length = bsv.length
-      val index = bsv.index.slice(0, bsv.used)
-      val data = bsv.data.slice(0, bsv.used).map(_.toDouble)
+      val used = bsv.used
+      val index = bsv.index.slice(0, used)
+      val data = bsv.data.slice(0, used).map(_.toDouble)
       new SSV(length, index, data).asInstanceOf[SV]
     }
     val simMatrix = new RowMatrix(rows).columnSimilarities()
@@ -176,7 +172,7 @@ class TopicModeling private[mllib](
     }, (a, b) => a + b)
     val (termProb, totalNum) = corpus.outerJoinVertices(newCounts) {
       (_, f, n) =>
-        (f._1, n.get)
+        (f.counter, n.get)
     }.mapTriplets {
       triplet =>
         val (termCounter, _) = triplet.srcAttr
@@ -198,12 +194,16 @@ class TopicModeling private[mllib](
   }
 }
 
+
 object TopicModeling {
+
 
   type DocId = VertexId
   type WordId = VertexId
   type Count = Int
-  type VD = (BV[Count], Option[(BV[Double], BV[Double])])
+
+  case class VD(counter: BSV[Count], dist: BSV[Double], dist1: BSV[Double])
+
   type ED = Array[Count]
 
   def train(docs: RDD[(DocId, SSV)],
@@ -237,25 +237,6 @@ object TopicModeling {
     broadcastModel.unpersist()
     topicModeling.runGibbsSampling(totalIter - burnIn)
     topicModeling.saveTopicModel(burnIn)
-  }
-
-  private[mllib] def merge(a: BV[Count], b: BV[Count]): BV[Count] = {
-    assert(a.size == b.size)
-    a :+ b
-  }
-
-  private[mllib] def update(a: BV[Count], t: Int, inc: Int): BV[Count] = {
-    a(t) += inc
-    a
-  }
-
-  private[mllib] def zeros(numTopics: Int, isDense: Boolean = false): BV[Count] = {
-    if (isDense) {
-      BDV.zeros(numTopics)
-    }
-    else {
-      BSV.zeros(numTopics)
-    }
   }
 
   @inline private[mllib] def maxMinIndexSearch[V](v: BSV[V], i: Int,
@@ -296,7 +277,7 @@ object TopicModeling {
   }
 
   private[mllib] def collectTermTopicDist(graph: Graph[VD, ED],
-    totalTopicCounter: BV[Count],
+    totalTopicCounter: BDV[Count],
     sumTerms: Long,
     numTerms: Int,
     numTopics: Int,
@@ -304,112 +285,128 @@ object TopicModeling {
     beta: Double): Graph[VD, ED] = {
     graph.mapVertices[VD]((vertexId, counter) => {
       if (vertexId >= 0) {
-        val termTopicCounter = counter._1
-        val w = BSV.zeros[Double](numTopics)
-        val w1 = BSV.zeros[Double](numTopics)
-        var wi = 0D
+        val termTopicCounter = counter.counter
+        termTopicCounter.compact()
+        val length = termTopicCounter.length
+        val used = termTopicCounter.used
+        val index = termTopicCounter.index
+        val data = termTopicCounter.data
 
-        termTopicCounter.activeIterator.foreach { case (i, v) =>
+        val w = new Array[Double](used)
+        val w1 = new Array[Double](used)
+
+        var wi = 0D
+        var i = 0
+
+        while (i < used) {
+          val topic = index(i)
+          val count = data(i)
           var adjustment = 0D
           val alphaAS = alpha
-          w(i) = v * ((totalTopicCounter(i) * (alpha * numTopics)) +
+
+          w(i) = count * ((totalTopicCounter(topic) * (alpha * numTopics)) +
             (alpha * numTopics) * (adjustment + alphaAS) +
             adjustment * (sumTerms - 1 + (alphaAS * numTopics))) /
-            (totalTopicCounter(i) + (numTerms * beta)) /
+            (totalTopicCounter(topic) + (numTerms * beta)) /
             (sumTerms - 1 + (alphaAS * numTopics))
 
           adjustment = -1D
-          w1(i) = v * ((totalTopicCounter(i) * (alpha * numTopics)) +
+          w1(i) = count * ((totalTopicCounter(topic) * (alpha * numTopics)) +
             (alpha * numTopics) * (adjustment + alphaAS) +
             adjustment * (sumTerms - 1 + (alphaAS * numTopics))) /
-            (totalTopicCounter(i) + (numTerms * beta)) /
+            (totalTopicCounter(topic) + (numTerms * beta)) /
             (sumTerms - 1 + (alphaAS * numTopics))
 
           w1(i) = w1(i) - w(i)
           wi = w(i) + wi
           w(i) = wi
+          i += 1
         }
-
-        w(numTopics - 1) = wi
-        (termTopicCounter, Some(w, w1))
+        VD(termTopicCounter, new BSV[Double](index, w, used, length),
+          new BSV[Double](index, w1, used, length))
       }
       else {
+        counter.counter.compact
         counter
       }
     })
   }
 
-  @inline private[mllib] def collectDocTopicDist(
-    totalTopicCounter: BV[Count],
-    termTopicCounter: BV[Count],
-    docTopicCounter: BV[Count],
+  @inline private def collectDocTopicDist(
+    totalTopicCounter: BDV[Count],
+    termTopicCounter: BSV[Count],
+    docTopicCounter: BSV[Count],
     d: BDV[Double],
     d1: BDV[Double],
     sumTerms: Long,
     numTerms: Int,
     numTopics: Int,
     alpha: Double,
-    beta: Double): (BV[Double], BV[Double]) = {
-    assert(totalTopicCounter.size == numTopics)
+    beta: Double): Unit = {
+    val used = docTopicCounter.used
+    val index = docTopicCounter.index
+    val data = docTopicCounter.data
+
+    var i = 0
     var di = 0D
-    docTopicCounter.activeIterator.foreach { case (i, v) =>
+    while (i < used) {
+      val topic = index(i)
+      val count = data(i)
       var adjustment = 0D
       val alphaAS = alpha
 
-      d(i) = v * (sumTerms - 1 + (alphaAS * numTopics)) *
-        (termTopicCounter(i) + (adjustment + beta)) /
-        (totalTopicCounter(i) + adjustment + numTerms * beta) /
+      d(topic) = count * (sumTerms - 1 + (alphaAS * numTopics)) *
+        (termTopicCounter(topic) + (adjustment + beta)) /
+        (totalTopicCounter(topic) + adjustment + numTerms * beta) /
         (sumTerms - 1 + (alphaAS * numTopics))
 
       adjustment = -1D
-      d1(i) = v * (sumTerms - 1 + (alphaAS * numTopics)) *
-        (termTopicCounter(i) + (adjustment + beta)) /
-        (totalTopicCounter(i) + adjustment + numTerms * beta) /
+      d1(topic) = count * (sumTerms - 1 + (alphaAS * numTopics)) *
+        (termTopicCounter(topic) + (adjustment + beta)) /
+        (totalTopicCounter(topic) + adjustment + numTerms * beta) /
         (sumTerms - 1 + (alphaAS * numTopics))
 
-      d1(i) = d1(i) - d(i)
-      di = d(i) + di
-      d(i) = di
+      d1(topic) = d1(topic) - d(topic)
+      di = d(topic) + di
+      d(topic) = di
+
+      i += 1
     }
-
     d(numTopics - 1) = di
-
-    (d, d1)
   }
 
-  private[mllib] def collectGlobalTopicDist(totalTopicCounter: BV[Count],
+  private def collectGlobalTopicDist(totalTopicCounter: BDV[Count],
     sumTerms: Long,
     numTerms: Int,
     numTopics: Int,
     alpha: Double,
-    beta: Double): (BV[Double], BV[Double]) = {
-    assert(totalTopicCounter.size == numTopics)
-    var i = 0
+    beta: Double): (BDV[Double], BDV[Double]) = {
+    var topic = 0
     val t = BDV.zeros[Double](numTopics)
     val t1 = BDV.zeros[Double](numTopics)
     var ti = 0D
 
-    while (i < numTopics) {
+    while (topic < numTopics) {
       var adjustment = 0D
       val alphaAS = alpha
-      t(i) = (adjustment + beta) * (totalTopicCounter(i) * (alpha * numTopics) +
+      t(topic) = (adjustment + beta) * (totalTopicCounter(topic) * (alpha * numTopics) +
         alpha * numTopics * (adjustment + alphaAS) +
         adjustment * (sumTerms - 1 + (alphaAS * numTopics))) /
-        (totalTopicCounter(i) + (adjustment + numTerms * beta)) /
+        (totalTopicCounter(topic) + (adjustment + numTerms * beta)) /
         (sumTerms - 1 + (alphaAS * numTopics))
 
       adjustment = -1D
-      t1(i) = (adjustment + beta) * (totalTopicCounter(i) * (alpha * numTopics) +
+      t1(topic) = (adjustment + beta) * (totalTopicCounter(topic) * (alpha * numTopics) +
         alpha * numTopics * (adjustment + alphaAS) +
         adjustment * (sumTerms - 1 + (alphaAS * numTopics))) /
-        (totalTopicCounter(i) + (adjustment + numTerms * beta)) /
+        (totalTopicCounter(topic) + (adjustment + numTerms * beta)) /
         (sumTerms - 1 + (alphaAS * numTopics))
 
-      t1(i) = t1(i) - t(i)
-      ti = t(i) + ti
-      t(i) = ti
+      t1(topic) = t1(topic) - t(topic)
+      ti = t(topic) + ti
+      t(topic) = ti
 
-      i += 1
+      topic += 1
     }
     (t, t1)
   }
@@ -434,7 +431,7 @@ object TopicModeling {
   // scalastyle:on
   private[mllib] def sampleTopics(
     graph: Graph[VD, ED],
-    totalTopicCounter: BV[Count],
+    totalTopicCounter: BDV[Count],
     sumTerms: Long,
     innerIter: Long,
     numTerms: Int,
@@ -445,20 +442,22 @@ object TopicModeling {
     val parts = graph.edges.partitions.size
     val (t, t1) = collectGlobalTopicDist(totalTopicCounter, sumTerms, numTerms,
       numTopics, alpha, beta)
-    val sampleTopics = (gen: java.util.Random, d: BDV[Double], d1: BDV[Double],
+    val sampleTopics = (gen: Random, d: BDV[Double], d1: BDV[Double],
     triplet: EdgeTriplet[VD, ED]) => {
       assert(triplet.srcId >= 0)
-      val (termCounter, Some((w, w1))) = triplet.srcAttr
-      val (docTopicCounter, _) = triplet.dstAttr
-      collectDocTopicDist(totalTopicCounter, termCounter,
-        docTopicCounter, d, d1, sumTerms, numTerms, numTopics, alpha, beta)
-
+      assert(triplet.dstId < 0)
+      val termTopicCounter = triplet.srcAttr.counter
+      val docTopicCounter = triplet.dstAttr.counter
       val topics = triplet.attr
+      val w = triplet.srcAttr.dist
+      val w1 = triplet.srcAttr.dist1
+      collectDocTopicDist(totalTopicCounter, termTopicCounter, docTopicCounter,
+        d, d1, sumTerms, numTerms, numTopics, alpha, beta)
+
       var i = 0
       while (i < topics.length) {
         val oldTopic = topics(i)
-        val newTopic = multinomialDistSampler(gen, docTopicCounter.asInstanceOf[BSV[Count]],
-          d, w.asInstanceOf[BSV[Double]], t.asInstanceOf[BDV[Double]],
+        val newTopic = multinomialDistSampler(gen, docTopicCounter, d, w, t,
           d1(oldTopic), w1(oldTopic), t1(oldTopic), oldTopic)
         topics(i) = newTopic
         i += 1
@@ -468,7 +467,7 @@ object TopicModeling {
 
     graph.mapTriplets {
       (pid, iter) =>
-        val gen = new java.util.Random(parts * innerIter + pid)
+        val gen = new Random(parts * innerIter + pid)
         val d = BDV.zeros[Double](numTopics)
         val d1 = BDV.zeros[Double](numTopics)
         iter.map {
@@ -479,11 +478,11 @@ object TopicModeling {
   }
 
   private[mllib] def updateCounter(graph: Graph[VD, ED], numTopics: Int): Graph[VD, ED] = {
-    val newCounter = graph.mapReduceTriplets[BV[Int]](e => {
+    val newCounter = graph.mapReduceTriplets[BSV[Count]](e => {
       val docId = e.dstId
       val wordId = e.srcId
       val newTopics = e.attr
-      val vector = zeros(numTopics)
+      val vector = BSV.zeros[Count](numTopics)
       var i = 0
       while (i < newTopics.length) {
         val newTopic = newTopics(i)
@@ -492,18 +491,18 @@ object TopicModeling {
       }
       Iterator((docId, vector), (wordId, vector))
 
-    }, merge)
-    graph.joinVertices(newCounter)((_, _, n) => (n, None))
+    }, _ :+ _)
+    graph.joinVertices(newCounter)((_, _, n) => VD(n, null, null))
   }
 
   private[mllib] def collectGlobalCounter(graph: Graph[VD, ED],
-    numTopics: Int): BV[Count] = {
-    graph.vertices.filter(t => t._1 >= 0).map(_._2._1).
-      aggregate(zeros(numTopics, isDense = true))(merge, merge)
+    numTopics: Int): BDV[Count] = {
+    graph.vertices.filter(t => t._1 >= 0).map(_._2.counter).
+      aggregate(BDV.zeros[Count](numTopics))(_ :+= _, _ :+= _)
   }
 
   private def updateTopicModel(termVertices: VertexRDD[VD], topicModel: TopicModel): Unit = {
-    termVertices.map(t => (t._1.toInt, t._2._1)).
+    termVertices.map(t => (t._1.toInt, t._2.counter)).
       collect().foreach { case (term, ttc) =>
       ttc.activeIterator.foreach { case (topic, inc) =>
         topicModel.update(term, topic, inc)
@@ -553,10 +552,10 @@ object TopicModeling {
     d1: Double, w1: Double, t1: Double, currentTopic: Int): Int = {
     val numTopics = d.length
     val distSum = rand.nextDouble() * (t(numTopics - 1) + t1 +
-      w(numTopics - 1) + w1 + d(numTopics - 1) + d1)
+      w.data(w.used - 1) + w1 + d(numTopics - 1) + d1)
 
     var begin = 0
-    var end = numTopics
+    var end = numTopics - 1
     var found = false
     var mid = (end + begin) >> 1
     var sum = 0D
@@ -578,7 +577,7 @@ object TopicModeling {
         found = true
       }
     }
-    val topic = if (sum < distSum) {
+    val topic = if (sum < distSum && mid < numTopics - 1) {
       mid + 1
     }
     else if (isLeft) {
@@ -608,7 +607,7 @@ object TopicModeling {
     storageLevel: StorageLevel,
     computedModel: Broadcast[TopicModel] = null): Graph[VD, ED] = {
     val edges = docs.mapPartitionsWithIndex((pid, iter) => {
-      val gen = new java.util.Random(pid)
+      val gen = new Random(pid)
       var model: TopicModel = null
       if (computedModel != null) model = computedModel.value
       iter.flatMap {
@@ -616,7 +615,7 @@ object TopicModeling {
           initializeEdges(gen, doc, docId, numTopics, model)
       }
     })
-    val corpus: Graph[VD, ED] = Graph.fromEdges(edges, (zeros(numTopics), None),
+    val corpus: Graph[VD, ED] = Graph.fromEdges(edges, null,
       storageLevel, storageLevel)
     updateCounter(corpus, numTopics).cache()
   }
@@ -658,9 +657,6 @@ class TopicModelingKryoRegistrator extends KryoRegistrator {
 
     kryo.register(classOf[BSV[TopicModeling.Count]])
     kryo.register(classOf[BSV[TopicModel.Count]])
-
-    kryo.register(classOf[BV[TopicModeling.Count]])
-    kryo.register(classOf[BV[TopicModel.Count]])
 
     kryo.register(classOf[BDV[TopicModeling.Count]])
     kryo.register(classOf[BDV[TopicModel.Count]])
