@@ -20,9 +20,7 @@ package org.apache.spark.mllib.feature
 import java.util.Random
 
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV}
-import org.apache.spark.annotation.Experimental
-import org.apache.spark.mllib.linalg.{Vectors, DenseVector => SDV,
-SparseVector => SSV, Vector => SV}
+import org.apache.spark.mllib.linalg.{Vectors, DenseVector => SDV, SparseVector => SSV}
 
 import TopicModel.Count
 
@@ -63,7 +61,7 @@ class TopicModel private[mllib](
     this
   }
 
-  def inference(doc: SSV, totalIter: Int, burnIn: Int, rand: Random): SV = {
+  def inference(doc: SSV, totalIter: Int, burnIn: Int, rand: Random): SSV = {
     require(totalIter > burnIn, "totalIter is less than burnInIter")
     require(totalIter > 0, "totalIter is less than 0")
     require(burnIn > 0, "burnInIter is less than 0")
@@ -80,11 +78,10 @@ class TopicModel private[mllib](
       i += 1
     }
     if (burnIn > 1) topicDist :/= (totalIter - burnIn).toDouble
-    Vectors.fromBreeze(topicDist)
+    Vectors.fromBreeze(topicDist).asInstanceOf[SSV]
   }
 
-  private[mllib] def uniformDistSamplerForDocument(
-    indices: Array[Int], topics: Array[Array[Int]],
+  private[mllib] def uniformDistSamplerForDocument(indices: Array[Int], topics: Array[Array[Int]],
     numTopics: Int, rand: Random): BSV[Count] = {
     val docTopicCounter = BSV.zeros[Count](numTopics)
     var index = 0
@@ -122,7 +119,6 @@ class TopicModel private[mllib](
     newDocTopicCounter
   }
 
-
   @inline private def maxMinSV(i: Int, w: BSV[Double]) = {
     val lastReturnedPos = TopicModeling.maxMinIndexSearch(w, i, -1)
     if (lastReturnedPos > -1) {
@@ -133,7 +129,7 @@ class TopicModel private[mllib](
     }
   }
 
-  @inline private def index(i: Int, t: BDV[Double], w: BSV[Double], d: BSV[Double]) = {
+  @inline private def index(t: BDV[Double], w: BSV[Double], d: BSV[Double])(i: Int) = {
     val lastDS = maxMinSV(i, d)
     val lastWS = maxMinSV(i, w)
     val lastTS = t(i)
@@ -146,8 +142,8 @@ class TopicModel private[mllib](
   @inline private def multinomialDistSampler(rand: Random, t: BDV[Double],
     w: BSV[Double], d: BSV[Double]): Int = {
     val numTopics = d.length
-    val distSum = rand.nextDouble() * (t(numTopics - 1) + w.data(w.used - 1) + d.data(d.used - 1))
-    val fun = index(_: Int, t, w, d)
+    val distSum = rand.nextDouble * (t(numTopics - 1) + w.data(w.used - 1) + d.data(d.used - 1))
+    val fun = index(t, w, d) _
     TopicModeling.minMaxValueSearch(fun, distSum, numTopics)
   }
 
@@ -155,8 +151,7 @@ class TopicModel private[mllib](
     val d = BSV.zeros[Double](numTopics)
     var lastSum = 0D
     docTopicCounter.activeIterator.filter(_._2 > 0).foreach { case (topic, cn) =>
-      d(topic) = cn * (ttc(term)(topic) + beta) /
-        (gtc(topic) + (numTerms * beta))
+      d(topic) = cn * (ttc(term)(topic) + beta) / (gtc(topic) + (numTerms * beta))
       lastSum = d(topic) + lastSum
       d(topic) = lastSum
     }

@@ -69,10 +69,10 @@ class TopicModeling private[mllib](
    */
   @transient private var globalTopicCounter: BDV[Count] = collectGlobalCounter(corpus, numTopics)
   assert(brzSum(globalTopicCounter) == sumTerms)
+
   @transient private val sc = corpus.vertices.context
   @transient private val seed = new Random().nextInt()
   @transient private var innerIter = 1
-
   @transient private var cachedEdges: EdgeRDD[ED, VD] = corpus.edges
   @transient private var cachedVertices: VertexRDD[VD] = corpus.vertices
 
@@ -198,14 +198,12 @@ class TopicModeling private[mllib](
 
 object TopicModeling {
 
+  private[mllib] type DocId = VertexId
+  private[mllib] type WordId = VertexId
+  private[mllib] type Count = Int
+  private[mllib] type ED = Array[Count]
 
-  type DocId = VertexId
-  type WordId = VertexId
-  type Count = Int
-
-  case class VD(counter: BSV[Count], dist: BSV[Double], dist1: BSV[Double])
-
-  type ED = Array[Count]
+  private[mllib] case class VD(counter: BSV[Count], dist: BSV[Double], dist1: BSV[Double])
 
   def train(docs: RDD[(DocId, SSV)],
     numTopics: Int = 2048,
@@ -239,118 +237,6 @@ object TopicModeling {
     topicModeling.runGibbsSampling(totalIter - burnIn)
     topicModeling.saveTopicModel(burnIn)
   }
-
-  @inline private[mllib] def maxMinIndexSearch[V](v: BSV[V], i: Int,
-    lastReturnedPos: Int): Int = {
-    val array = v.array
-    val index = array.index
-    if (array.activeSize == 0) return -1
-    if (index(0) > i) return -1
-    if (lastReturnedPos >= array.activeSize - 1) return array.activeSize - 1
-    var begin = lastReturnedPos
-    var end = array.activeSize - 1
-    var found = false
-    if (end > i) end = i
-    if (begin < 0) begin = 0
-
-    var mid = (end + begin) >> 1
-
-    while (!found && begin <= end) {
-      if (index(mid) < i) {
-        begin = mid + 1
-        mid = (end + begin) >> 1
-      }
-      else if (index(mid) > i) {
-        end = mid - 1
-        mid = (end + begin) >> 1
-      }
-      else {
-        found = true
-      }
-    }
-
-    if (found || index(mid) < i || mid == 0) {
-      mid
-    }
-    else {
-      mid - 1
-    }
-  }
-
-  @inline private[mllib] def minMaxValueSearch(index: (Int) => Double, distSum: Double,
-    numTopics: Int): Int = {
-    var begin = 0
-    var end = numTopics - 1
-    var found = false
-    var mid = (end + begin) >> 1
-    var sum = 0D
-    var isLeft = false
-    while (!found && begin <= end) {
-      sum = index(mid)
-      if (sum < distSum) {
-        isLeft = false
-        begin = mid + 1
-        mid = (end + begin) >> 1
-      }
-      else if (sum > distSum) {
-        isLeft = true
-        end = mid - 1
-        mid = (end + begin) >> 1
-      }
-      else {
-        found = true
-      }
-    }
-    val topic = if (sum < distSum) {
-      mid + 1
-    }
-    else if (isLeft) {
-      mid + 1
-    } else {
-      mid - 1
-    }
-    assert(index(topic) >= distSum)
-    if (topic > 0) assert(index(topic - 1) <= distSum)
-    topic
-  }
-
-  @inline private def maxMinD(i: Int, docTopicCounter: BSV[Count], d: BDV[Double]) = {
-    val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
-    if (lastReturnedPos > -1) {
-      d(docTopicCounter.index(lastReturnedPos))
-    }
-    else {
-      0D
-    }
-  }
-
-  @inline private def maxMinW(i: Int, w: BSV[Double]) = {
-    val lastReturnedPos = maxMinIndexSearch(w, i, -1)
-    if (lastReturnedPos > -1) {
-      w.data(lastReturnedPos)
-    }
-    else {
-      0D
-    }
-  }
-
-  @inline private def maxMinT(i: Int, t: BDV[Double]) = {
-    t(i)
-  }
-
-  @inline private def index(i: Int, docTopicCounter: BSV[Count],
-    d: BDV[Double], w: BSV[Double], t: BDV[Double],
-    d1: Double, w1: Double, t1: Double, currentTopic: Int) = {
-    val lastDS = maxMinD(i, docTopicCounter, d)
-    val lastWS = maxMinW(i, w)
-    val lastTS = maxMinT(i, t)
-    if (i >= currentTopic) {
-      lastDS + lastWS + lastTS + d1 + w1 + t1
-    } else {
-      lastDS + lastWS + lastTS
-    }
-  }
-
 
   private[mllib] def collectTermTopicDist(graph: Graph[VD, ED],
     totalTopicCounter: BDV[Count],
@@ -549,7 +435,7 @@ object TopicModeling {
     }
   }
 
-  private[mllib] def updateCounter(graph: Graph[VD, ED], numTopics: Int): Graph[VD, ED] = {
+  private def updateCounter(graph: Graph[VD, ED], numTopics: Int): Graph[VD, ED] = {
     val newCounter = graph.mapReduceTriplets[BSV[Count]](e => {
       val docId = e.dstId
       val wordId = e.srcId
@@ -567,7 +453,7 @@ object TopicModeling {
     graph.joinVertices(newCounter)((_, _, n) => VD(n, null, null))
   }
 
-  private[mllib] def collectGlobalCounter(graph: Graph[VD, ED],
+  private def collectGlobalCounter(graph: Graph[VD, ED],
     numTopics: Int): BDV[Count] = {
     graph.vertices.filter(t => t._1 >= 0).map(_._2.counter).
       aggregate(BDV.zeros[Count](numTopics))(_ :+= _, _ :+= _)
@@ -586,27 +472,7 @@ object TopicModeling {
     }
   }
 
-  /**
-   * A multinomial distribution sampler, using roulette method to sample an Int back.
-   */
-  @inline private def multinomialDistSampler[V](rand: Random, docTopicCounter: BSV[Count],
-    d: BDV[Double], w: BSV[Double], t: BDV[Double],
-    d1: Double, w1: Double, t1: Double, currentTopic: Int): Int = {
-    val numTopics = d.length
-    val distSum = rand.nextDouble() * (t(numTopics - 1) + t1 +
-      w.data(w.used - 1) + w1 + d(numTopics - 1) + d1)
-    val fun = index(_: Int, docTopicCounter, d, w, t, d1, w1, t1, currentTopic)
-    minMaxValueSearch(fun, distSum, numTopics)
-  }
-
-  /**
-   * A uniform distribution sampler, which is only used for initialization.
-   */
-  private[mllib] def uniformDistSampler(rand: Random, dimension: Int): Int = {
-    rand.nextInt(dimension)
-  }
-
-  private[mllib] def initializeCorpus(
+  private def initializeCorpus(
     docs: RDD[(TopicModeling.DocId, SSV)],
     numTopics: Int,
     storageLevel: StorageLevel,
@@ -653,6 +519,137 @@ object TopicModeling {
         case (term, topic) =>
           Edge(term, newDocId, topic)
       }
+    }
+  }
+
+  /**
+   * A multinomial distribution sampler, using roulette method to sample an Int back.
+   */
+  @inline private def multinomialDistSampler[V](rand: Random, docTopicCounter: BSV[Count],
+    d: BDV[Double], w: BSV[Double], t: BDV[Double],
+    d1: Double, w1: Double, t1: Double, currentTopic: Int): Int = {
+    val numTopics = d.length
+    val distSum = rand.nextDouble() * (t(numTopics - 1) + t1 +
+      w.data(w.used - 1) + w1 + d(numTopics - 1) + d1)
+    val fun = index(docTopicCounter, d, w, t, d1, w1, t1, currentTopic) _
+    minMaxValueSearch(fun, distSum, numTopics)
+  }
+
+  /**
+   * A uniform distribution sampler, which is only used for initialization.
+   */
+  @inline private[mllib] def uniformDistSampler(rand: Random, dimension: Int): Int = {
+    rand.nextInt(dimension)
+  }
+
+  @inline private[mllib] def maxMinIndexSearch[V](v: BSV[V], i: Int,
+    lastReturnedPos: Int): Int = {
+    val array = v.array
+    val index = array.index
+    if (array.activeSize == 0) return -1
+    if (index(0) > i) return -1
+    if (lastReturnedPos >= array.activeSize - 1) return array.activeSize - 1
+    var begin = lastReturnedPos
+    var end = array.activeSize - 1
+    var found = false
+    if (end > i) end = i
+    if (begin < 0) begin = 0
+
+    var mid = (end + begin) >> 1
+
+    while (!found && begin <= end) {
+      if (index(mid) < i) {
+        begin = mid + 1
+        mid = (end + begin) >> 1
+      }
+      else if (index(mid) > i) {
+        end = mid - 1
+        mid = (end + begin) >> 1
+      }
+      else {
+        found = true
+      }
+    }
+
+    if (found || index(mid) < i || mid == 0) {
+      mid
+    }
+    else {
+      mid - 1
+    }
+  }
+
+  @inline private[mllib] def minMaxValueSearch(index: (Int) => Double, distSum: Double,
+    numTopics: Int): Int = {
+    var begin = 0
+    var end = numTopics - 1
+    var found = false
+    var mid = (end + begin) >> 1
+    var sum = 0D
+    var isLeft = false
+    while (!found && begin <= end) {
+      sum = index(mid)
+      if (sum < distSum) {
+        isLeft = false
+        begin = mid + 1
+        mid = (end + begin) >> 1
+      }
+      else if (sum > distSum) {
+        isLeft = true
+        end = mid - 1
+        mid = (end + begin) >> 1
+      }
+      else {
+        found = true
+      }
+    }
+    val topic = if (sum < distSum) {
+      mid + 1
+    }
+    else if (isLeft) {
+      mid + 1
+    } else {
+      mid - 1
+    }
+    assert(index(topic) >= distSum)
+    if (topic > 0) assert(index(topic - 1) <= distSum)
+    topic
+  }
+
+  @inline private def maxMinD(i: Int, docTopicCounter: BSV[Count], d: BDV[Double]) = {
+    val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
+    if (lastReturnedPos > -1) {
+      d(docTopicCounter.index(lastReturnedPos))
+    }
+    else {
+      0D
+    }
+  }
+
+  @inline private def maxMinW(i: Int, w: BSV[Double]) = {
+    val lastReturnedPos = maxMinIndexSearch(w, i, -1)
+    if (lastReturnedPos > -1) {
+      w.data(lastReturnedPos)
+    }
+    else {
+      0D
+    }
+  }
+
+  @inline private def maxMinT(i: Int, t: BDV[Double]) = {
+    t(i)
+  }
+
+  @inline private def index(docTopicCounter: BSV[Count],
+    d: BDV[Double], w: BSV[Double], t: BDV[Double],
+    d1: Double, w1: Double, t1: Double, currentTopic: Int)(i: Int) = {
+    val lastDS = maxMinD(i, docTopicCounter, d)
+    val lastWS = maxMinW(i, w)
+    val lastTS = maxMinT(i, t)
+    if (i >= currentTopic) {
+      lastDS + lastWS + lastTS + d1 + w1 + t1
+    } else {
+      lastDS + lastWS + lastTS
     }
   }
 }
