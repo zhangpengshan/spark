@@ -377,14 +377,16 @@ object TopicModeling {
     alpha: Double,
     beta: Double): (BDV[Double], BDV[Double]) = {
     val alphaAS = alpha
+    val termSum = sumTerms - 1D + alphaAS * numTopics
+    val betaSum = numTerms * beta
     val denominator = BDV.zeros[Double](numTopics)
     val denominator1 = BDV.zeros[Double](numTopics)
     for (topic <- 0 until numTopics) {
-      denominator(topic) = totalTopicCounter(topic) + (numTerms * beta)
-      denominator(topic) = denominator(topic) * (sumTerms - 1D + (alphaAS * numTopics))
+      denominator(topic) = totalTopicCounter(topic) + betaSum
+      denominator(topic) = denominator(topic) * termSum
 
-      denominator1(topic) = totalTopicCounter(topic) - 1D + (numTerms * beta)
-      denominator1(topic) = denominator1(topic) * (sumTerms - 1D + (alphaAS * numTopics))
+      denominator1(topic) = totalTopicCounter(topic) - 1D + betaSum
+      denominator1(topic) = denominator1(topic) * termSum
     }
     (denominator, denominator1)
   }
