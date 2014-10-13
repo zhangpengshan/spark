@@ -64,11 +64,8 @@ class TopicModeling private[mllib](
    */
   private val sumTerms = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
 
-  /**
-   * The total counts for each topic
-   */
-  @transient private var globalTopicCounter: BDV[Count] = collectGlobalCounter(corpus, numTopics)
-  assert(brzSum(globalTopicCounter) == sumTerms)
+
+  @transient private var globalParameter: GlobalParameter = collectGlobalParameter(corpus)
 
   @transient private val sc = corpus.vertices.context
   @transient private val seed = new Random().nextInt()
@@ -90,7 +87,9 @@ class TopicModeling private[mllib](
     }
   }
 
-  private def globalParameter(): GlobalParameter = {
+  private def collectGlobalParameter(graph: Graph[VD, ED]): GlobalParameter = {
+    val globalTopicCounter = collectGlobalCounter(graph, numTopics)
+    assert(brzSum(globalTopicCounter) == sumTerms)
     val (denominator, denominator1) = denominatorBDV(globalTopicCounter,
       sumTerms, numTerms, numTopics, alpha, beta)
     val (t, t1) = collectGlobalTopicDist(globalTopicCounter, denominator, denominator1,
@@ -99,8 +98,7 @@ class TopicModeling private[mllib](
   }
 
   private def gibbsSampling(): Unit = {
-
-    val broadcast = sc.broadcast(globalParameter())
+    val broadcast = sc.broadcast(globalParameter)
     val corpusTopicDist = collectTermTopicDist(corpus, broadcast,
       sumTerms, numTopics, alpha, beta)
 
@@ -112,8 +110,7 @@ class TopicModeling private[mllib](
 
     corpus = updateCounter(corpusSampleTopics, numTopics)
     corpus.vertices.setName(s"vertices-$innerIter").cache()
-    globalTopicCounter = collectGlobalCounter(corpus, numTopics)
-    assert(brzSum(globalTopicCounter) == sumTerms)
+    globalParameter = collectGlobalParameter(corpus)
     Option(cachedVertices).foreach(_.unpersist())
     cachedVertices = corpus.vertices
 
@@ -169,7 +166,7 @@ class TopicModeling private[mllib](
   }
 
   def perplexity(): Double = {
-    val totalTopicCounter = this.globalTopicCounter
+    val totalTopicCounter = this.globalParameter.totalTopicCounter
     val numTopics = this.numTopics
     val numTerms = this.numTerms
     val alpha = this.alpha
@@ -193,7 +190,7 @@ class TopicModeling private[mllib](
         (0 until numTopics).foreach {
           topic =>
             val phi = (termCounter(topic) + beta) / (totalTopicCounter(topic) + numTerms * beta)
-            val theta = (docTopicCounter(topic) + alpha) / (docTopicCount + alpha * numTopics)
+            val theta = (docTopicCounter(topic) + alpha) / (docTopicCount + numTopics * alpha)
             probWord += phi * theta
         }
         (Math.log(probWord * size) * size, size)
@@ -481,8 +478,7 @@ object TopicModeling {
     graph.joinVertices(newCounter)((_, _, n) => VD(n, null, null))
   }
 
-  private def collectGlobalCounter(graph: Graph[VD, ED],
-    numTopics: Int): BDV[Count] = {
+  private def collectGlobalCounter(graph: Graph[VD, ED], numTopics: Int): BDV[Count] = {
     graph.vertices.filter(t => t._1 >= 0).map(_._2.counter).
       aggregate(BDV.zeros[Count](numTopics))(_ :+= _, _ :+= _)
   }
@@ -570,7 +566,7 @@ object TopicModeling {
     rand.nextInt(dimension)
   }
 
-  @inline private[mllib] def maxMinIndexSearch[V](v: BSV[V], i: Int,
+  @inline private[mllib] def minMaxIndexSearch[V](v: BSV[V], i: Int,
     lastReturnedPos: Int): Int = {
     val array = v.array
     val index = array.index
@@ -599,12 +595,15 @@ object TopicModeling {
       }
     }
 
-    if (found || index(mid) < i || mid == 0) {
+    val minMax = if (found || index(mid) < i || mid == 0) {
       mid
     }
     else {
       mid - 1
     }
+    // assert(index(minMax) <= i)
+    // if (minMax < array.activeSize - 1) assert(index(minMax + 1) > i)
+    minMax
   }
 
   @inline private[mllib] def minMaxValueSearch(index: (Int) => Double, distSum: Double,
@@ -639,13 +638,13 @@ object TopicModeling {
     } else {
       mid - 1
     }
-    assert(index(topic) >= distSum)
-    if (topic > 0) assert(index(topic - 1) <= distSum)
+    // assert(index(topic) >= distSum)
+    // if (topic > 0) assert(index(topic - 1) <= distSum)
     topic
   }
 
   @inline private def maxMinD(i: Int, docTopicCounter: BSV[Count], d: BDV[Double]) = {
-    val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
+    val lastReturnedPos = minMaxIndexSearch(docTopicCounter, i, -1)
     if (lastReturnedPos > -1) {
       d(docTopicCounter.index(lastReturnedPos))
     }
@@ -655,7 +654,7 @@ object TopicModeling {
   }
 
   @inline private def maxMinW(i: Int, w: BSV[Double]) = {
-    val lastReturnedPos = maxMinIndexSearch(w, i, -1)
+    val lastReturnedPos = minMaxIndexSearch(w, i, -1)
     if (lastReturnedPos > -1) {
       w.data(lastReturnedPos)
     }

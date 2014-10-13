@@ -120,7 +120,7 @@ class TopicModel private[mllib](
   }
 
   @inline private def maxMinSV(i: Int, w: BSV[Double]) = {
-    val lastReturnedPos = TopicModeling.maxMinIndexSearch(w, i, -1)
+    val lastReturnedPos = TopicModeling.minMaxIndexSearch(w, i, -1)
     if (lastReturnedPos > -1) {
       w.data(lastReturnedPos)
     }
