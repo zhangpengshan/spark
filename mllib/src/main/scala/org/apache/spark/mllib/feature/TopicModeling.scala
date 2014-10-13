@@ -118,8 +118,8 @@ class TopicModeling private[mllib](
       gibbsSampling()
       updateTopicModel(termVertices, topicModel)
     }
-    topicModel._topicCounter :/= burnInIter.toDouble
-    topicModel._topicTermCounter.foreach(_ :/= burnInIter.toDouble)
+    topicModel.gtc :/= burnInIter.toDouble
+    topicModel.ttc.foreach(_ :/= burnInIter.toDouble)
     topicModel
   }
 
@@ -228,7 +228,7 @@ object TopicModeling {
     require(totalIter > burnIn, "totalIter is less than burnIn")
     require(totalIter > 0, "totalIter is less than 0")
     require(burnIn > 0, "burnIn is less than 0")
-    val numTopics = computedModel.topicCounter.size
+    val numTopics = computedModel.ttc.size
     val alpha = computedModel.alpha
     val beta = computedModel.beta
 
@@ -276,6 +276,81 @@ object TopicModeling {
       mid - 1
     }
   }
+
+  @inline private[mllib] def minMaxValueSearch(index: (Int) => Double, distSum: Double,
+    numTopics: Int): Int = {
+    var begin = 0
+    var end = numTopics - 1
+    var found = false
+    var mid = (end + begin) >> 1
+    var sum = 0D
+    var isLeft = false
+    while (!found && begin <= end) {
+      sum = index(mid)
+      if (sum < distSum) {
+        isLeft = false
+        begin = mid + 1
+        mid = (end + begin) >> 1
+      }
+      else if (sum > distSum) {
+        isLeft = true
+        end = mid - 1
+        mid = (end + begin) >> 1
+      }
+      else {
+        found = true
+      }
+    }
+    val topic = if (sum < distSum) {
+      mid + 1
+    }
+    else if (isLeft) {
+      mid + 1
+    } else {
+      mid - 1
+    }
+    assert(index(topic) >= distSum)
+    if (topic > 0) assert(index(topic - 1) <= distSum)
+    topic
+  }
+
+  @inline private def maxMinD(i: Int, docTopicCounter: BSV[Count], d: BDV[Double]) = {
+    val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
+    if (lastReturnedPos > -1) {
+      d(docTopicCounter.index(lastReturnedPos))
+    }
+    else {
+      0D
+    }
+  }
+
+  @inline private def maxMinW(i: Int, w: BSV[Double]) = {
+    val lastReturnedPos = maxMinIndexSearch(w, i, -1)
+    if (lastReturnedPos > -1) {
+      w.data(lastReturnedPos)
+    }
+    else {
+      0D
+    }
+  }
+
+  @inline private def maxMinT(i: Int, t: BDV[Double]) = {
+    t(i)
+  }
+
+  @inline private def index(i: Int, docTopicCounter: BSV[Count],
+    d: BDV[Double], w: BSV[Double], t: BDV[Double],
+    d1: Double, w1: Double, t1: Double, currentTopic: Int) = {
+    val lastDS = maxMinD(i, docTopicCounter, d)
+    val lastWS = maxMinW(i, w)
+    val lastTS = maxMinT(i, t)
+    if (i >= currentTopic) {
+      lastDS + lastWS + lastTS + d1 + w1 + t1
+    } else {
+      lastDS + lastWS + lastTS
+    }
+  }
+
 
   private[mllib] def collectTermTopicDist(graph: Graph[VD, ED],
     totalTopicCounter: BDV[Count],
@@ -499,96 +574,29 @@ object TopicModeling {
   }
 
   private def updateTopicModel(termVertices: VertexRDD[VD], topicModel: TopicModel): Unit = {
-    termVertices.map(t => (t._1.toInt, t._2.counter)).collect().foreach { case (term, ttc) =>
-      ttc.activeIterator.foreach {
-        case (topic, inc) =>
-          topicModel.update(term, topic, inc)
-      }
+    termVertices.map(vertex => {
+      val termTopicCounter = vertex._2.counter
+      val index = termTopicCounter.index.slice(0, termTopicCounter.used)
+      val data = termTopicCounter.data.slice(0, termTopicCounter.used).map(_.toDouble)
+      val used = termTopicCounter.used
+      val length = termTopicCounter.length
+      (vertex._1.toInt, new BSV[Double](index, data, used, length))
+    }).collect().foreach { case (term, counter) =>
+      topicModel.merge(term, counter)
     }
   }
 
-  @inline private def maxMinD(i: Int, docTopicCounter: BSV[Count], d: BDV[Double]) = {
-    val lastReturnedPos = maxMinIndexSearch(docTopicCounter, i, -1)
-    if (lastReturnedPos > -1) {
-      d(docTopicCounter.index(lastReturnedPos))
-    }
-    else {
-      0D
-    }
-  }
-
-  @inline private def maxMinW(i: Int, w: BSV[Double]) = {
-    val lastReturnedPos = maxMinIndexSearch(w, i, -1)
-    if (lastReturnedPos > -1) {
-      w.data(lastReturnedPos)
-    }
-    else {
-      0D
-    }
-  }
-
-  @inline private def maxMinT(i: Int, t: BDV[Double]) = {
-    t(i)
-  }
-
-  @inline private def index(i: Int, docTopicCounter: BSV[Count],
-    d: BDV[Double], w: BSV[Double], t: BDV[Double],
-    d1: Double, w1: Double, t1: Double, currentTopic: Int) = {
-    val lastDS = maxMinD(i, docTopicCounter, d)
-    val lastWS = maxMinW(i, w)
-    val lastTS = maxMinT(i, t)
-    if (i >= currentTopic) {
-      lastDS + lastWS + lastTS + d1 + w1 + t1
-    } else {
-      lastDS + lastWS + lastTS
-    }
-  }
-
+  /**
+   * A multinomial distribution sampler, using roulette method to sample an Int back.
+   */
   @inline private def multinomialDistSampler[V](rand: Random, docTopicCounter: BSV[Count],
     d: BDV[Double], w: BSV[Double], t: BDV[Double],
     d1: Double, w1: Double, t1: Double, currentTopic: Int): Int = {
     val numTopics = d.length
     val distSum = rand.nextDouble() * (t(numTopics - 1) + t1 +
       w.data(w.used - 1) + w1 + d(numTopics - 1) + d1)
-
-    var begin = 0
-    var end = numTopics - 1
-    var found = false
-    var mid = (end + begin) >> 1
-    var sum = 0D
-    var isLeft = false
-
-    while (!found && begin <= end) {
-      sum = index(mid, docTopicCounter, d, w, t, d1, w1, t1, currentTopic)
-      if (sum < distSum) {
-        isLeft = false
-        begin = mid + 1
-        mid = (end + begin) >> 1
-      }
-      else if (sum > distSum) {
-        isLeft = true
-        end = mid - 1
-        mid = (end + begin) >> 1
-      }
-      else {
-        found = true
-      }
-    }
-    val topic = if (sum < distSum && mid < numTopics - 1) {
-      mid + 1
-    }
-    else if (isLeft) {
-      mid + 1
-    } else {
-      mid - 1
-    }
-
-    assert(index(topic, docTopicCounter, d, w, t, d1, w1, t1, currentTopic) >= distSum)
-    if (topic > 0) {
-      assert(index(topic - 1, docTopicCounter, d, w, t, d1, w1, t1, currentTopic) <= distSum)
-    }
-
-    topic
+    val fun = index(_: Int, docTopicCounter, d, w, t, d1, w1, t1, currentTopic)
+    minMaxValueSearch(fun, distSum, numTopics)
   }
 
   /**
@@ -640,7 +648,7 @@ object TopicModeling {
       val docTopicCounter = computedModel.uniformDistSamplerForDocument(indices,
         topics, numTopics, gen)
       (0 to 2).foreach(t => computedModel.generateTopicDistForDocument(
-        docTopicCounter, indices, topics, realTime = false, gen))
+        docTopicCounter, indices, topics, gen))
       indices.zip(topics).map {
         case (term, topic) =>
           Edge(term, newDocId, topic)
