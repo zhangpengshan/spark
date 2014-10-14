@@ -512,7 +512,7 @@ object TopicModeling {
       }
     })
     var corpus: Graph[VD, ED] = Graph.fromEdges(edges, null, storageLevel, storageLevel)
-    corpus.partitionBy(PartitionStrategy.EdgePartition1D)
+    //corpus.partitionBy(PartitionStrategy.EdgePartition1D)
     corpus = updateCounter(corpus, numTopics).cache()
     corpus.vertices.count()
     corpus
