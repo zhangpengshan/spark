@@ -472,13 +472,11 @@ object TopicModeling {
         i += 1
       }
       Iterator((docId, vector), (wordId, vector))
-
-    }, _ :+ _)
-    graph.outerJoinVertices(newCounter)((_, _, n) => {
-      val vector = n.get
-      vector.compact()
-      vector
+    }, _ :+ _).mapValues(t => {
+      t.compact()
+      t
     })
+    graph.outerJoinVertices(newCounter)((_, _, n) => n.get)
   }
 
   private def collectGlobalCounter(graph: Graph[VD, ED], numTopics: Int): BDV[Count] = {
