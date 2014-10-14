@@ -713,6 +713,7 @@ class TopicModelingKryoRegistrator extends KryoRegistrator {
 
     kryo.register(classOf[TopicModeling.ED])
     kryo.register(classOf[TopicModeling.VD])
+    kryo.register(classOf[TopicModeling.Parameter])
     kryo.register(classOf[TopicModeling.GlobalParameter])
 
     kryo.register(classOf[Random])
