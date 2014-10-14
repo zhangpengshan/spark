@@ -136,16 +136,13 @@ class TopicModeling private[mllib](
       Option(previousTermTopicCounter).foreach(_.unpersist())
       previousTermTopicCounter = termTopicCounter
     }
-
-    val gtc = BDV.zeros[Double](numTopics)
-    val ttc = new Array[BSV[Double]](numTerms)
+    val topicModel = TopicModel(numTopics, numTerms, alpha, beta)
     termTopicCounter.collect().foreach { case (term, counter) =>
-      gtc :+= counter
-      ttc(term) = counter
+      topicModel.merge(term, counter)
     }
-    gtc :/= burnInIter.toDouble
-    ttc.foreach(_ :/= burnInIter.toDouble)
-    new TopicModel(gtc, ttc, alpha, beta)
+    topicModel.gtc :/= burnInIter.toDouble
+    topicModel.ttc.foreach(_ :/= burnInIter.toDouble)
+    topicModel
   }
 
   def runGibbsSampling(iterations: Int): Unit = {
