@@ -141,7 +141,10 @@ class TopicModeling private[mllib](
       topicModel.merge(term, counter)
     }
     topicModel.gtc :/= burnInIter.toDouble
-    topicModel.ttc.foreach(_ :/= burnInIter.toDouble)
+    topicModel.ttc.foreach { ttc =>
+      ttc :/= burnInIter.toDouble
+      ttc.compact()
+    }
     topicModel
   }
 
