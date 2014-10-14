@@ -70,7 +70,7 @@ class TopicModeling private[mllib](
   @transient private val sc = corpus.vertices.context
   @transient private val seed = new Random().nextInt()
   @transient private var innerIter = 1
-  @transient private var cachedEdges: EdgeRDD[ED, VD] = corpus.edges
+  @transient private var cachedEdges: EdgeRDD[ED, _] = corpus.edges
   @transient private var cachedVertices: VertexRDD[VD] = corpus.vertices
 
   private def termVertices = corpus.vertices.filter(t => t._1 >= 0)
@@ -139,7 +139,7 @@ class TopicModeling private[mllib](
 
   @Experimental
   def mergeDuplicateTopic(threshold: Double = 0.95D): Map[Int, Int] = {
-    val rows = termVertices.map(t => t._2.counter).map { bsv =>
+    val rows = termVertices.map(t => t._2).map { bsv =>
       val length = bsv.length
       val used = bsv.used
       val index = bsv.index.slice(0, used)
@@ -179,8 +179,8 @@ class TopicModeling private[mllib](
       Iterator((docId, size), (wordId, size))
     }, (a, b) => a + b)
     val (termProb, totalNum) = corpus.outerJoinVertices(newCounts) {
-      (_, f, n) =>
-        (f.counter, n.get)
+      (_, counter, n) =>
+        (counter, n.get)
     }.mapTriplets {
       triplet =>
         val (termCounter, _) = triplet.srcAttr
@@ -209,11 +209,12 @@ object TopicModeling {
   private[mllib] type WordId = VertexId
   private[mllib] type Count = Int
   private[mllib] type ED = Array[Count]
-
-  private[mllib] case class VD(counter: BSV[Count], dist: BSV[Double], dist1: BSV[Double])
+  private[mllib] type VD = BSV[Count]
 
   private[mllib] case class GlobalParameter(totalTopicCounter: BDV[Count],
     t: BDV[Double], t1: BDV[Double], denominator: BDV[Double], denominator1: BDV[Double])
+
+  private[mllib] case class Parameter(counter: BSV[Count], dist: BSV[Double], dist1: BSV[Double])
 
   def train(docs: RDD[(DocId, SSV)],
     numTopics: Int = 2048,
@@ -292,16 +293,14 @@ object TopicModeling {
     sumTerms: Long,
     numTopics: Int,
     alpha: Double,
-    beta: Double): Graph[VD, ED] = {
-    val newVD = graph.vertices.filter(_._1 >= 0).mapPartitions { vertices =>
+    beta: Double): Graph[Parameter, ED] = {
+    graph.mapVertices { (vertexId, counter) =>
       val GlobalParameter(totalTopicCounter, _, _, denominator, denominator1) = broadcast.value
       val alphaAS = alpha
       val alphaSum = alpha * numTopics
       val termSum = sumTerms - 1D + alphaAS * numTopics
-
-      vertices.map { v =>
-        val vertexId = v._1
-        val termTopicCounter = v._2.counter
+      if (vertexId >= 0) {
+        val termTopicCounter = counter
         termTopicCounter.compact()
         val length = termTopicCounter.length
         val used = termTopicCounter.used
@@ -327,13 +326,15 @@ object TopicModeling {
           w(i) = wi
           i += 1
         }
-        val vd = VD(termTopicCounter, new BSV[Double](index, w, used, length),
+        Parameter(termTopicCounter, new BSV[Double](index, w, used, length),
           new BSV[Double](index, w1, used, length))
-        (vertexId, vd)
+      }
+      else {
+        val docTopicCounter = counter
+        docTopicCounter.compact()
+        Parameter(docTopicCounter, null, null)
       }
     }
-
-    graph.joinVertices(newVD)((_, _, nvd) => nvd)
   }
 
   private def collectGlobalTopicDist(
@@ -407,13 +408,13 @@ object TopicModeling {
    */
   // scalastyle:on
   private[mllib] def sampleTopics(
-    graph: Graph[VD, ED],
+    graph: Graph[Parameter, ED],
     broadcast: Broadcast[GlobalParameter],
     sumTerms: Long,
     innerIter: Long,
     numTopics: Int,
     alpha: Double,
-    beta: Double): Graph[VD, ED] = {
+    beta: Double): Graph[Parameter, ED] = {
     val parts = graph.edges.partitions.size
 
     val sampleTopics = (gen: Random,
@@ -424,7 +425,7 @@ object TopicModeling {
     denominator1: BDV[Double],
     d: BDV[Double],
     d1: BDV[Double],
-    triplet: EdgeTriplet[VD, ED]) => {
+    triplet: EdgeTriplet[Parameter, ED]) => {
       assert(triplet.srcId >= 0)
       assert(triplet.dstId < 0)
       val termTopicCounter = triplet.srcAttr.counter
@@ -460,7 +461,7 @@ object TopicModeling {
     }
   }
 
-  private def updateCounter(graph: Graph[VD, ED], numTopics: Int): Graph[VD, ED] = {
+  private def updateCounter[D](graph: Graph[D, ED], numTopics: Int): Graph[VD, ED] = {
     val newCounter = graph.mapReduceTriplets[BSV[Count]](e => {
       val docId = e.dstId
       val wordId = e.srcId
@@ -475,17 +476,17 @@ object TopicModeling {
       Iterator((docId, vector), (wordId, vector))
 
     }, _ :+ _)
-    graph.joinVertices(newCounter)((_, _, n) => VD(n, null, null))
+    graph.outerJoinVertices(newCounter)((_, _, n) => n.get)
   }
 
   private def collectGlobalCounter(graph: Graph[VD, ED], numTopics: Int): BDV[Count] = {
-    graph.vertices.filter(t => t._1 >= 0).map(_._2.counter).
+    graph.vertices.filter(t => t._1 >= 0).map(_._2).
       aggregate(BDV.zeros[Count](numTopics))(_ :+= _, _ :+= _)
   }
 
   private def updateTopicModel(termVertices: VertexRDD[VD], topicModel: TopicModel): Unit = {
     termVertices.map(vertex => {
-      val termTopicCounter = vertex._2.counter
+      val termTopicCounter = vertex._2
       val index = termTopicCounter.index.slice(0, termTopicCounter.used)
       val data = termTopicCounter.data.slice(0, termTopicCounter.used).map(_.toDouble)
       val used = termTopicCounter.used
