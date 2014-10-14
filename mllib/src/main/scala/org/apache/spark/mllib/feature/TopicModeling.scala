@@ -463,14 +463,12 @@ object TopicModeling {
     val newCounter = graph.mapReduceTriplets[BSV[Count]](e => {
       val docId = e.dstId
       val wordId = e.srcId
-      val newTopics = e.attr
+      val topics = e.attr
       val vector = BSV.zeros[Count](numTopics)
-      var i = 0
-      while (i < newTopics.length) {
-        val newTopic = newTopics(i)
-        vector(newTopic) += 1
-        i += 1
+      for (topic <- topics) {
+        vector(topic) += 1
       }
+      vector.compact()
       Iterator((docId, vector), (wordId, vector))
     }, _ :+ _).mapValues(t => {
       t.compact()
