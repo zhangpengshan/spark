@@ -295,13 +295,13 @@ object TopicModeling {
     alpha: Double,
     beta: Double): Graph[Parameter, ED] = {
     graph.mapVertices { (vertexId, counter) =>
-      val GlobalParameter(totalTopicCounter, _, _, denominator, denominator1) = broadcast.value
-      val alphaAS = alpha
-      val alphaSum = alpha * numTopics
-      val termSum = sumTerms - 1D + alphaAS * numTopics
       if (vertexId >= 0) {
+        val GlobalParameter(totalTopicCounter, _, _, denominator, denominator1) = broadcast.value
+        val alphaAS = alpha
+        val alphaSum = alpha * numTopics
+        val termSum = sumTerms - 1D + alphaAS * numTopics
+
         val termTopicCounter = counter
-        termTopicCounter.compact()
         val length = termTopicCounter.length
         val used = termTopicCounter.used
         val index = termTopicCounter.index
@@ -330,9 +330,7 @@ object TopicModeling {
           new BSV[Double](index, w1, used, length))
       }
       else {
-        val docTopicCounter = counter
-        docTopicCounter.compact()
-        Parameter(docTopicCounter, null, null)
+        Parameter(counter, null, null)
       }
     }
   }
@@ -476,7 +474,11 @@ object TopicModeling {
       Iterator((docId, vector), (wordId, vector))
 
     }, _ :+ _)
-    graph.outerJoinVertices(newCounter)((_, _, n) => n.get)
+    graph.outerJoinVertices(newCounter)((_, _, n) => {
+      val vector = n.get
+      vector.compact()
+      vector
+    })
   }
 
   private def collectGlobalCounter(graph: Graph[VD, ED], numTopics: Int): BDV[Count] = {
