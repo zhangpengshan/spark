@@ -19,7 +19,7 @@ package org.apache.spark.mllib.feature
 
 import java.util.Random
 
-import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV}
+import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV, norm => brzNorm}
 import org.apache.spark.mllib.linalg.{Vectors, DenseVector => SDV, SparseVector => SSV}
 
 import TopicModel.Count
@@ -41,27 +41,7 @@ class TopicModel private[mllib](
 
   def topicTermCounter = ttc.map(t => Vectors.fromBreeze(t))
 
-  private[mllib] def merge(term: Int, topic: Int, inc: Int) = {
-    gtc(topic) += inc
-    ttc(term)(topic) += inc
-    this
-  }
-
-  private[mllib] def merge(term: Int, counter: BSV[Double]) = {
-    ttc(term) :+= counter
-    gtc :+= counter
-    this
-  }
-
-  private[mllib] def merge(other: TopicModel) = {
-    gtc :+= other.gtc
-    for (i <- 0 until ttc.length) {
-      ttc(i) :+= other.ttc(i)
-    }
-    this
-  }
-
-  def inference(doc: SSV, totalIter: Int, burnIn: Int, rand: Random): SSV = {
+  def inference(doc: SSV, totalIter: Int = 10, burnIn: Int = 5, rand: Random = new Random): SSV = {
     require(totalIter > burnIn, "totalIter is less than burnInIter")
     require(totalIter > 0, "totalIter is less than 0")
     require(burnIn > 0, "burnInIter is less than 0")
@@ -77,7 +57,7 @@ class TopicModel private[mllib](
       if (i + burnIn >= totalIter) topicDist :+= docTopicCounter
       i += 1
     }
-    if (burnIn > 1) topicDist :/= (totalIter - burnIn).toDouble
+    topicDist :/= brzNorm(topicDist, 1)
     Vectors.fromBreeze(topicDist).asInstanceOf[SSV]
   }
 
@@ -182,6 +162,27 @@ class TopicModel private[mllib](
     }
     w
   }
+
+  private[mllib] def merge(term: Int, topic: Int, inc: Int) = {
+    gtc(topic) += inc
+    ttc(term)(topic) += inc
+    this
+  }
+
+  private[mllib] def merge(term: Int, counter: BSV[Double]) = {
+    ttc(term) :+= counter
+    gtc :+= counter
+    this
+  }
+
+  private[mllib] def merge(other: TopicModel) = {
+    gtc :+= other.gtc
+    for (i <- 0 until ttc.length) {
+      ttc(i) :+= other.ttc(i)
+    }
+    this
+  }
+
 }
 
 object TopicModel {

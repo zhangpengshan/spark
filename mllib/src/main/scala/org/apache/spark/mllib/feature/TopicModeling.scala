@@ -119,20 +119,38 @@ class TopicModeling private[mllib](
   }
 
   def saveTopicModel(burnInIter: Int): TopicModel = {
-    val topicModel = TopicModel(numTopics, numTerms, alpha, beta)
+    var termTopicCounter: RDD[(Int, BSV[Double])] = null
     for (iter <- 1 to burnInIter) {
-      logInfo("Save TopicModel (Iteration %d/%d)".format(iter, burnInIter))
+      logInfo(s"Save TopicModel (Iteration $iter/$burnInIter)")
+      var previousTermTopicCounter = termTopicCounter
       gibbsSampling()
-      updateTopicModel(termVertices, topicModel)
+      val newTermTopicCounter = updateTopicModel(termVertices)
+      termTopicCounter = Option(termTopicCounter).map(_.join(newTermTopicCounter).map {
+        case (term, (a, b)) =>
+          val c = a + b
+          c.compact()
+          (term, c)
+      }).getOrElse(newTermTopicCounter)
+
+      termTopicCounter.cache().count()
+      Option(previousTermTopicCounter).foreach(_.unpersist())
+      previousTermTopicCounter = termTopicCounter
     }
-    topicModel.gtc :/= burnInIter.toDouble
-    topicModel.ttc.foreach(_ :/= burnInIter.toDouble)
-    topicModel
+
+    val gtc = BDV.zeros[Double](numTopics)
+    val ttc = new Array[BSV[Double]](numTerms)
+    termTopicCounter.collect().foreach { case (term, counter) =>
+      gtc :+= counter
+      ttc(term) = counter
+    }
+    gtc :/= burnInIter.toDouble
+    ttc.foreach(_ :/= burnInIter.toDouble)
+    new TopicModel(gtc, ttc, alpha, beta)
   }
 
   def runGibbsSampling(iterations: Int): Unit = {
     for (iter <- 1 to iterations) {
-      logInfo("Start Gibbs sampling (Iteration %d/%d)".format(iter, iterations))
+      logInfo(s"Start Gibbs sampling (Iteration $iter/$iterations)")
       gibbsSampling()
     }
   }
@@ -482,7 +500,7 @@ object TopicModeling {
       aggregate(BDV.zeros[Count](numTopics))(_ :+= _, _ :+= _)
   }
 
-  private def updateTopicModel(termVertices: VertexRDD[VD], topicModel: TopicModel): Unit = {
+  private def updateTopicModel(termVertices: VertexRDD[VD]): RDD[(Int, BSV[Double])] = {
     termVertices.map(vertex => {
       val termTopicCounter = vertex._2
       val index = termTopicCounter.index.slice(0, termTopicCounter.used)
@@ -490,9 +508,7 @@ object TopicModeling {
       val used = termTopicCounter.used
       val length = termTopicCounter.length
       (vertex._1.toInt, new BSV[Double](index, data, used, length))
-    }).collect().foreach { case (term, counter) =>
-      topicModel.merge(term, counter)
-    }
+    })
   }
 
   private def initializeCorpus(
