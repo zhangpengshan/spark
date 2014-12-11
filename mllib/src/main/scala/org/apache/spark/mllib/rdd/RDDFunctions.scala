@@ -91,14 +91,47 @@ class RDDFunctions[T: ClassTag](self: RDD[T]) extends Serializable {
       seqOp: (U, T) => U,
       combOp: (U, U) => U,
       depth: Int = 2): U = {
+    val cleanSeqOp = self.context.clean(seqOp)
+    val cleanCombOp = self.context.clean(combOp)
+    val itSeqOp = (z: U, t: (Int, Iterator[T])) => t._2.aggregate(z)(cleanSeqOp, cleanCombOp)
+    treeAggregatePartitionsWithIndex(zeroValue)(itSeqOp, cleanCombOp, depth)
+  }
+
+  /**
+   * Aggregates the elements of this RDD in a multi-level tree pattern.
+   *
+   * @param depth suggested depth of the tree (default: 2)
+   * @see [[org.apache.spark.rdd.RDD#aggregate]]
+   */
+  def treeAggregatePartitions[U: ClassTag](zeroValue: U)(
+      seqOp: (U, Iterator[T]) => U,
+      combOp: (U, U) => U,
+      depth: Int = 2): U = {
+    val cleanSeqOp = self.context.clean(seqOp)
+    val itSeqOp = (z: U, t: (Int, Iterator[T])) => cleanSeqOp(z, t._2)
+    treeAggregatePartitionsWithIndex(zeroValue)(itSeqOp, combOp, depth)
+  }
+
+  /**
+   * Aggregates the elements of this RDD in a multi-level tree pattern.
+   *
+   * @param depth suggested depth of the tree (default: 2)
+   * @see [[org.apache.spark.rdd.RDD#aggregate]]
+   */
+  def treeAggregatePartitionsWithIndex[U: ClassTag](zeroValue: U)(
+    seqOp: (U, (Int, Iterator[T])) => U,
+    combOp: (U, U) => U,
+    depth: Int = 2): U = {
     require(depth >= 1, s"Depth must be greater than or equal to 1 but got $depth.")
     if (self.partitions.size == 0) {
       return Utils.clone(zeroValue, self.context.env.closureSerializer.newInstance())
     }
     val cleanSeqOp = self.context.clean(seqOp)
     val cleanCombOp = self.context.clean(combOp)
-    val aggregatePartition = (it: Iterator[T]) => it.aggregate(zeroValue)(cleanSeqOp, cleanCombOp)
-    var partiallyAggregated = self.mapPartitions(it => Iterator(aggregatePartition(it)))
+    val aggregatePartition = (pid: Int, it: Iterator[T]) => cleanSeqOp(zeroValue, (pid, it))
+    var partiallyAggregated = self.mapPartitionsWithIndex { (pid, iter) =>
+      Iterator(aggregatePartition(pid, iter))
+    }
     var numPartitions = partiallyAggregated.partitions.size
     val scale = math.max(math.ceil(math.pow(numPartitions, 1.0 / depth)).toInt, 2)
     // If creating an extra level doesn't help reduce the wall-clock time, we stop tree aggregation.

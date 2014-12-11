@@ -50,6 +50,44 @@ abstract class Gradient extends Serializable {
    * @return loss
    */
   def compute(data: Vector, label: Double, weights: Vector, cumGradient: Vector): Double
+
+  /**
+   * Compute the gradient and loss given the partition.
+   *
+   * @param iter  Iterator for [(label, data)] pair
+   * @param weights weights/coefficients corresponding to features
+   * @param cumGradient the computed gradient will be added to this vector
+   *
+   * @return (count: Long, loss: Double)
+   */
+  def computePartitions(
+      iter: Iterator[(Double, Vector)],
+      weights: Vector,
+      cumGradient: Vector): (Long, Double) = {
+    var loss = 0D
+    var count = 0L
+    iter.foreach { t =>
+      loss += compute(t._2, t._1, weights, cumGradient)
+      count += 1
+    }
+    (count, loss)
+  }
+
+  /**
+   * Compute the gradient and loss given the partition.
+   *
+   * @param iter  Iterator for [(label, data)] pair
+   * @param weights weights/coefficients corresponding to features
+   * @param cumGradient the computed gradient will be added to this vector
+   *
+   * @return (count: Long, loss: Double)
+   */
+  def computePartitionsWithIndex(
+      iter: (Int, Iterator[(Double, Vector)]),
+      weights: Vector,
+      cumGradient: Vector): (Long, Double) = {
+     computePartitions(iter._2, weights, cumGradient)
+  }
 }
 
 /**
