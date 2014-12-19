@@ -206,14 +206,14 @@ object LBFGS extends Logging {
       // Have a local copy to avoid the serialization of CostFun object which is not serializable.
       val w = Vectors.fromBreeze(weights)
       val n = w.size
-      val z =Vectors.zeros(n)
       val bcW = data.context.broadcast(w)
       val localGradient = gradient
 
-      val (gradientSum, lossSum) = data.treeAggregatePartitionsWithIndex((z, 0.0))(
+      val (gradientSum, lossSum) = data.mapPartitions(t => Iterator(t))
+        .treeAggregate((Vectors.zeros(n), 0.0))(
           seqOp = (c, v) => {
-            // c: (grad, loss), v: (pid ,Iterator[(label, features)]),l: (count, loss)
-            val l = localGradient.computePartitionsWithIndex(v, bcW.value, c._1)
+            // c: (grad, loss), v: Iterator[(label, features)], l: (count, loss)
+            val l = localGradient.compute(v, bcW.value, c._1)
             (c._1, c._2 + l._2)
           },
           combOp = (c1, c2) => {

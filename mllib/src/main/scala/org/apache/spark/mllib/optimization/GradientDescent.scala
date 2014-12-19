@@ -187,10 +187,11 @@ object GradientDescent extends Logging {
       // Sample a subset (fraction miniBatchFraction) of the total data
       // compute and sum up the subgradients on this subset (this is one map-reduce)
       val (gradientSum, lossSum, miniBatchSize) = data.sample(false, miniBatchFraction, 42 + i)
-        .treeAggregatePartitionsWithIndex((Vectors.zeros(n), 0.0, 0L))(
+        .mapPartitions(t => Iterator(t))
+        .treeAggregate((Vectors.zeros(n), 0.0, 0L))(
           seqOp = (c, v) => {
-            // c: (grad, loss, count), v: (pid ,Iterator[(label, features)]),l: (count, loss)
-            val l = gradient.computePartitionsWithIndex(v, bcWeights.value, c._1)
+            // c: (grad, loss, count), v: Iterator[(label, features)],l: (count, loss)
+            val l = gradient.compute(v, bcWeights.value, c._1)
             (c._1, c._2 + l._2, c._3 + l._1)
           },
           combOp = (c1, c2) => {
