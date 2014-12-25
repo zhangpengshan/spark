@@ -79,7 +79,7 @@ object DBN extends Logging {
         rbmLayer
       } else {
         Layer.initUniformDistWeight(rbmLayer.weight, 0.01)
-        new SoftmaxLayer(rbmLayer.weight, rbmLayer.bias)
+        new SoftMaxLayer(rbmLayer.weight, rbmLayer.bias)
       }
     }
     val mlp = new MLP(innerLayers)

@@ -22,6 +22,7 @@ import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM, sum => brzSum}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.Logging
 import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV, Vectors}
+import org.apache.spark.storage.StorageLevel
 import org.apache.spark.rdd.RDD
 
 class StackedRBM(val innerRBMs: Array[RBM])
@@ -84,7 +85,7 @@ object StackedRBM extends Logging {
       val broadcastStackedRBM = sc.broadcast(stackedRBM)
       val dataBatch = batches(data, broadcastStackedRBM, batchSize, numInput, layer)
       val rbm = stackedRBM.innerRBMs(layer)
-      dataBatch.cache().setName(s"dataBatch-$layer")
+      dataBatch.persist(StorageLevel.MEMORY_AND_DISK).setName(s"dataBatch-$layer")
       RBM.train(dataBatch, batchSize, numIteration, rbm,
         fraction, learningRate, weightCost)
       broadcastStackedRBM.destroy(blocking = false)

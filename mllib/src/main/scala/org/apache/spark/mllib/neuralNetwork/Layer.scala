@@ -19,7 +19,7 @@ package org.apache.spark.mllib.neuralNetwork
 
 import java.util.Random
 
-import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM, max => brzmax}
+import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM, max => brzMax}
 
 import org.apache.spark.Logging
 import org.apache.spark.util.Utils
@@ -58,7 +58,6 @@ private[mllib] trait Layer extends Serializable {
     for (i <- 0 until input.cols) {
       gradBias :+= delta(::, i)
     }
-
     (gradWeight, gradBias)
   }
 
@@ -81,7 +80,7 @@ private[mllib] trait Layer extends Serializable {
 
   def computeNeuronPrimitive(temp: BDM[Double], output: BDM[Double]): Unit
 
-  def sample(out: BDM[Double]): BDM[Double] = out
+  protected[neuralNetwork] def sample(out: BDM[Double]): BDM[Double] = out
 }
 
 private[mllib] class SigmoidLayer(
@@ -111,7 +110,7 @@ private[mllib] class SigmoidLayer(
     }
   }
 
-  override def sample(input: BDM[Double]): BDM[Double] = {
+  protected[neuralNetwork] override def sample(input: BDM[Double]): BDM[Double] = {
     input.mapValues(v => if (rand.nextDouble() < v) 1D else 0D)
   }
 }
@@ -144,12 +143,12 @@ private[mllib] class TanhLayer(
     }
   }
 
-  override def sample(input: BDM[Double]): BDM[Double] = {
+  protected[neuralNetwork] override def sample(input: BDM[Double]): BDM[Double] = {
     input.mapValues(v => if (rand.nextDouble() < v) 1D else 0D)
   }
 }
 
-private[mllib] class SoftmaxLayer(
+private[mllib] class SoftMaxLayer(
   val weight: BDM[Double],
   val bias: BDV[Double]) extends Layer with Logging {
 
@@ -159,12 +158,12 @@ private[mllib] class SoftmaxLayer(
 
   def computeNeuron(temp: BDM[Double]): Unit = {
     for (col <- 0 until temp.cols) {
-      softmax(temp(::, col))
+      softMax(temp(::, col))
     }
   }
 
-  def softmax(temp: BDV[Double]): Unit = {
-    val max = brzmax(temp)
+  def softMax(temp: BDV[Double]): Unit = {
+    val max = brzMax(temp)
     var sum = 0D
     for (i <- 0 until temp.length) {
       temp(i) = Math.exp(temp(i) - max)
@@ -176,6 +175,35 @@ private[mllib] class SoftmaxLayer(
   def computeNeuronPrimitive(
     temp: BDM[Double],
     output: BDM[Double]): Unit = {
+    // See: http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.49.6403
+
+    //  for (i <- 0 until temp.rows) {
+    //    for (j <- 0 until temp.cols) {
+    //      temp(i, j) = temp(i, j) * softMaxPrimitive(output(i, j))
+    //    }
+    //  }
+  }
+
+  protected[neuralNetwork] override def sample(out: BDM[Double]): BDM[Double] = {
+    for (j <- 0 until out.cols) {
+      val v = out(::, j)
+      var sum = 0D
+      var index = 0
+      var find = false
+      val s = rand.nextDouble()
+      while (!find && index < v.length) {
+        sum += v(index)
+        if (sum >= s) {
+          find = true
+        } else {
+          index += 1
+        }
+      }
+      v :*= 0D
+      index = if (find) index else index - 1
+      v(index) = 1
+    }
+    out
   }
 }
 
@@ -245,7 +273,7 @@ private[mllib] class ReLuLayer(
     }
   }
 
-  override def sample(input: BDM[Double]): BDM[Double] = {
+  protected[neuralNetwork] override def sample(input: BDM[Double]): BDM[Double] = {
     input.mapValues { v =>
       val sd = sigmoid(v, 32)
       val x = v + sd * rand.nextGaussian()
@@ -280,7 +308,7 @@ private[mllib] class SoftPlusLayer(
     }
   }
 
-  override def sample(input: BDM[Double]): BDM[Double] = {
+  protected[neuralNetwork] override def sample(input: BDM[Double]): BDM[Double] = {
     input.mapValues { v =>
       val sd = sigmoid(v)
       val x = v + sd * rand.nextGaussian()
@@ -318,7 +346,7 @@ private[mllib] class GaussianLayer(
     }
   }
 
-  override def sample(input: BDM[Double]): BDM[Double] = {
+  protected[neuralNetwork] override def sample(input: BDM[Double]): BDM[Double] = {
     input.mapValues(v => v + rand.nextGaussian())
   }
 }
@@ -357,7 +385,7 @@ private[mllib] object Layer {
   def initUniformDistWeight(w: BDM[Double], scale: Double): BDM[Double] = {
     val numIn = w.cols
     val numOut = w.rows
-    val s = if (scale <= 0) 4D * math.sqrt(6D / (numIn + numOut)) else scale
+    val s = if (scale <= 0) math.sqrt(6D / (numIn + numOut)) else scale
     initUniformDistWeight(w, -s, s)
   }
 
@@ -427,6 +455,10 @@ private[mllib] object Layer {
   }
 
   @inline def sigmoidPrimitive(y: Double): Double = {
+    y * (1 - y)
+  }
+
+  @inline def softMaxPrimitive(y: Double): Double = {
     y * (1 - y)
   }
 

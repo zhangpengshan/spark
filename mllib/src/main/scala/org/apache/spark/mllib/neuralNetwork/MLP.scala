@@ -22,12 +22,13 @@ import java.util.Random
 import scala.collection.JavaConversions._
 
 import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM, axpy => brzAxpy,
-argmax => brzArgMax, norm => brzNorm}
+  argmax => brzArgMax, max => brzMax, sum => brzSum}
 
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.Logging
 import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV, Vectors, BLAS}
 import org.apache.spark.mllib.optimization.{Gradient, Updater, LBFGS, GradientDescent}
+import org.apache.spark.storage.StorageLevel
 import org.apache.spark.rdd.RDD
 
 class MLP(
@@ -247,7 +248,7 @@ object MLP extends Logging {
       setStepSize(learningRate)
 
     val trainingRDD = toTrainingRDD(data, batchSize, nn.numInput, nn.numOut)
-    trainingRDD.cache().setName("MLP-dataBatch")
+    trainingRDD.persist(StorageLevel.MEMORY_AND_DISK).setName("MLP-dataBatch")
     val weights = optimizer.optimize(trainingRDD, toVector(nn))
     trainingRDD.unpersist()
     fromVector(nn, weights)
@@ -284,7 +285,9 @@ object MLP extends Logging {
       setRegParam(weightCost)
 
     val trainingRDD = toTrainingRDD(data, batchSize, nn.numInput, nn.numOut)
+    trainingRDD.persist(StorageLevel.MEMORY_AND_DISK).setName("MLP-dataBatch")
     val weights = optimizer.optimize(trainingRDD, toVector(nn))
+    trainingRDD.unpersist()
     fromVector(nn, weights)
     nn
   }
@@ -440,7 +443,7 @@ object MLP extends Logging {
     for (layer <- 0 until numLayer) {
       val (weight, bias) = w(layer)
       layers(layer) = if (layer == numLayer - 1) {
-        new SoftmaxLayer(weight, bias)
+        new SoftMaxLayer(weight, bias)
       }
       else {
         new ReLuLayer(weight, bias)
