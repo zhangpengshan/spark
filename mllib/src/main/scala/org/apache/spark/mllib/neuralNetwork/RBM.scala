@@ -17,6 +17,8 @@
 
 package org.apache.spark.mllib.neuralNetwork
 
+import java.util.Random
+
 import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM, sum => brzSum, axpy => brzAxpy}
 import org.apache.commons.math3.random.JDKRandomGenerator
 
@@ -24,6 +26,7 @@ import org.apache.spark.annotation.Experimental
 import org.apache.spark.Logging
 import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV}
 import org.apache.spark.mllib.optimization.{Gradient, GradientDescent}
+import org.apache.spark.storage.StorageLevel
 import org.apache.spark.util.Utils
 import org.apache.spark.rdd.RDD
 
@@ -44,7 +47,7 @@ class RBM(
   }
 
   require(dropoutRate >= 0 && dropoutRate < 1)
-  protected lazy val rand = new JDKRandomGenerator()
+  protected lazy val rand: Random = new JDKRandomGenerator()
 
   setSeed(Utils.random.nextInt())
 
@@ -243,7 +246,7 @@ object RBM extends Logging {
       data.map(t => (0D, t))
     }
     // TODO: the related jira SPARK-4526
-    trainingRDD.cache().setName("RBM-dataBatch")
+    trainingRDD.persist(StorageLevel.MEMORY_AND_DISK).setName("RBM-dataBatch")
     val weights = optimizer.optimize(trainingRDD, toVector(rbm))
     trainingRDD.unpersist()
     fromVector(rbm, weights)
