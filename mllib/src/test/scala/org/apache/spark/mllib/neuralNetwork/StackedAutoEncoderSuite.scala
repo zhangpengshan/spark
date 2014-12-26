@@ -20,16 +20,12 @@ package org.apache.spark.mllib.neuralNetwork
 import org.scalatest.{Matchers, FunSuite}
 import org.apache.spark.mllib.util.{MnistDatasetSuite}
 
-class DBNSuite extends FunSuite with MnistDatasetSuite with Matchers {
-
-  test("DBN") {
+class StackedAutoEncoderSuite extends FunSuite
+with MnistDatasetSuite with Matchers {
+  test("StackedAutoEncoder") {
     val (data, numVisible) = mnistTrainDataset(2500)
-    val dbn = new DBN(Array(numVisible, 500, 10))
-    DBN.pretrain(data, 23, 1000, dbn, 0.1, 0.05, 0.0)
-    DBN.finetune(data, 23, 2000, dbn, 0.1, 0.05, 0.0)
-    val (dataTest, _) = mnistTrainDataset(5000, 2500)
-    println("Error: " + MLP.error(dataTest, dbn.mlp, 100))
-
+    val dbn = new StackedAutoEncoder(Array(numVisible, 100, numVisible))
+    // StackedAutoEncoder.pretrain(data.map(_._1), 23, 1000, dbn, 0.1, 0.05, 0.0)
+    StackedAutoEncoder.finetune(data.map(_._1), 23, 8000, dbn, 0.1, 0.5, 0.0)
   }
-
 }

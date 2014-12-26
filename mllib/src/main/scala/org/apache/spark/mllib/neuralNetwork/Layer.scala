@@ -36,6 +36,8 @@ private[mllib] trait Layer extends Serializable {
 
   def numOut = weight.rows
 
+  def layerType: String
+
   protected lazy val rand: Random = new Random()
 
   def setSeed(seed: Long): Unit = {
@@ -92,6 +94,8 @@ private[mllib] class SigmoidLayer(
       initializeBias(numOut))
   }
 
+  def layerType: String = "sigmoid"
+
   def computeNeuron(temp: BDM[Double]): Unit = {
     for (i <- 0 until temp.rows) {
       for (j <- 0 until temp.cols) {
@@ -125,6 +129,8 @@ private[mllib] class TanhLayer(
       initializeBias(numOut))
   }
 
+  def layerType: String = "tanh"
+
   def computeNeuron(temp: BDM[Double]): Unit = {
     for (i <- 0 until temp.rows) {
       for (y <- 0 until temp.cols) {
@@ -155,6 +161,8 @@ private[mllib] class SoftMaxLayer(
   def this(numIn: Int, numOut: Int) {
     this(initializeWeight(numIn, numOut), initializeBias(numOut))
   }
+
+  def layerType: String = "softMax"
 
   def computeNeuron(temp: BDM[Double]): Unit = {
     for (col <- 0 until temp.cols) {
@@ -215,6 +223,8 @@ private[mllib] class NReLuLayer(
       initializeBias(numOut))
   }
 
+  def layerType: String = "nrelu"
+
   private def nReLu(tmp: BDM[Double]): Unit = {
     for (i <- 0 until tmp.rows) {
       for (j <- 0 until tmp.cols) {
@@ -245,10 +255,13 @@ private[mllib] class NReLuLayer(
 private[mllib] class ReLuLayer(
   val weight: BDM[Double],
   val bias: BDV[Double]) extends Layer with Logging {
+
   def this(numIn: Int, numOut: Int) {
     this(initUniformDistWeight(numIn, numOut, 0.0, 0.01),
       initializeBias(numOut))
   }
+
+  def layerType: String = "relu"
 
   private def relu(tmp: BDM[Double]): Unit = {
     for (i <- 0 until tmp.rows) {
@@ -290,6 +303,8 @@ private[mllib] class SoftPlusLayer(
       initializeBias(numOut))
   }
 
+  def layerType: String = "softplus"
+
   def computeNeuron(temp: BDM[Double]): Unit = {
     for (i <- 0 until temp.rows) {
       for (j <- 0 until temp.cols) {
@@ -322,9 +337,12 @@ private[mllib] class SoftPlusLayer(
 private[mllib] class GaussianLayer(
   val weight: BDM[Double],
   val bias: BDV[Double]) extends Layer with Logging {
+
   def this(numIn: Int, numOut: Int) {
     this(initGaussianDistWeight(numIn, numOut), initializeBias(numOut))
   }
+
+  def layerType: String = "gaussian"
 
   def computeNeuron(tmp: BDM[Double]): Unit = {
     for (i <- 0 until tmp.rows) {
@@ -353,6 +371,30 @@ private[mllib] class GaussianLayer(
 
 
 private[mllib] object Layer {
+
+  def initializeLayer(
+    weight: BDM[Double],
+    bias: BDV[Double],
+    layerType: String): Layer = {
+    layerType match {
+      case "gaussian" =>
+        new GaussianLayer(weight, bias)
+      case "softplus" =>
+        new SoftPlusLayer(weight, bias)
+      case "relu" =>
+        new ReLuLayer(weight, bias)
+      case "nrelu" =>
+        new NReLuLayer(weight, bias)
+      case "softMax" =>
+        new SoftMaxLayer(weight, bias)
+      case "tanh" =>
+        new TanhLayer(weight, bias)
+      case "sigmoid" =>
+        new SigmoidLayer(weight, bias)
+      case _ =>
+        throw new IllegalArgumentException("layerType is not correct")
+    }
+  }
 
   def initializeBias(numOut: Int): BDV[Double] = {
     BDV.zeros[Double](numOut)
@@ -471,5 +513,36 @@ private[mllib] object Layer {
     else {
       math.exp(x)
     }
+  }
+
+  def meanSquaredError(out: BDM[Double], label: BDM[Double]): Double = {
+    assert(label.rows == out.rows)
+    assert(label.cols == out.cols)
+    var diff = 0D
+    for (i <- 0 until out.rows) {
+      for (j <- 0 until out.cols) {
+        diff += math.pow(label(i, j) - out(i, j), 2)
+      }
+    }
+    diff / out.rows
+  }
+
+  def crossEntropy(out: BDM[Double], label: BDM[Double]): Double = {
+    assert(label.rows == out.rows)
+    assert(label.cols == out.cols)
+    var cost = 0D
+    for (i <- 0 until out.rows) {
+      for (j <- 0 until out.cols) {
+        val a = label(i, j)
+        var b = out(i, j)
+        if (b == 0) {
+          b += 1e-15
+        } else if (b == 1D) {
+          b -= 1e-15
+        }
+        cost += a * math.log(b) + (1 - a) * math.log1p(1 - b)
+      }
+    }
+    (0D - cost) / out.rows
   }
 }
