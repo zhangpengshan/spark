@@ -107,18 +107,6 @@ class RBM(
     mask
   }
 
-  protected def meanSquaredError(visible: BDM[Double], out: BDM[Double]): Double = {
-    assert(visible.rows == out.rows)
-    assert(visible.cols == out.cols)
-    var diff = 0D
-    for (i <- 0 until out.rows) {
-      for (j <- 0 until out.cols) {
-        diff += math.pow(visible(i, j) - out(i, j), 2)
-      }
-    }
-    diff / out.rows
-  }
-
   def learn(input: BDM[Double]): (BDM[Double], BDV[Double], BDV[Double], Double, Double) = {
     val batchSize = input.cols
     val mask: BDM[Double] = if (dropoutRate > 0) {
@@ -162,7 +150,7 @@ class RBM(
       gradHiddenBias :+= diffHidden(::, i)
     }
 
-    val mse = meanSquaredError(input, vKMean)
+    val mse = Layer.meanSquaredError(input, vKMean)
     (gradWeight, gradVisibleBias, gradHiddenBias, mse, batchSize.toDouble)
   }
 

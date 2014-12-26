@@ -48,6 +48,23 @@ class StackedRBM(val innerRBMs: Array[RBM])
   def forward(visible: BDM[Double]): BDM[Double] = {
     forward(visible, numLayer)
   }
+
+  def topology: Array[Int] = {
+    val topology = new Array[Int](numLayer + 1)
+    topology(0) = numInput
+    for (i <- 1 to numLayer) {
+      topology(i) = innerRBMs(i - 1).numOut
+    }
+    topology
+  }
+
+  def toMLP(): MLP = {
+    val layers = new Array[Layer](numLayer)
+    for (layer <- 0 until numLayer) {
+      layers(layer) = innerRBMs(layer).hiddenLayer
+    }
+    new MLP(layers, innerRBMs.last.dropoutRate, innerRBMs.head.dropoutRate)
+  }
 }
 
 object StackedRBM extends Logging {

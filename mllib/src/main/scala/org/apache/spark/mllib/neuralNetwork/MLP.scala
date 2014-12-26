@@ -22,7 +22,7 @@ import java.util.Random
 import scala.collection.JavaConversions._
 
 import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM, axpy => brzAxpy,
-  argmax => brzArgMax, max => brzMax, sum => brzSum}
+argmax => brzArgMax, max => brzMax, sum => brzSum}
 
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.Logging
@@ -33,18 +33,20 @@ import org.apache.spark.rdd.RDD
 
 class MLP(
   val innerLayers: Array[Layer],
-  val hiddenLayersDropoutRate: Double = 0.5,
-  val inputLayerDropoutRate: Double = 0.2) extends Logging with Serializable {
+  val hiddenDropout: Double = 0.5,
+  val inputDropout: Double = 0.2) extends Logging with Serializable {
 
   def this(topology: Array[Int]) {
     this(MLP.initLayers(topology))
   }
 
   require(innerLayers.length > 0)
-  require(hiddenLayersDropoutRate >= 0 && hiddenLayersDropoutRate < 1)
-  require(inputLayerDropoutRate >= 0 && inputLayerDropoutRate < 1)
+  require(hiddenDropout >= 0 && hiddenDropout < 1)
+  require(inputDropout >= 0 && inputDropout < 1)
 
-  val topology: Array[Int] = {
+  protected[neuralNetwork] lazy val rand: Random = new Random()
+
+  def topology: Array[Int] = {
     val topology = new Array[Int](numLayer + 1)
     topology(0) = numInput
     for (i <- 1 to numLayer) {
@@ -52,8 +54,6 @@ class MLP(
     }
     topology
   }
-
-  private lazy val rand: Random = new Random()
 
   def numLayer = innerLayers.length
 
@@ -73,7 +73,7 @@ class MLP(
     output
   }
 
-  private[mllib] def learn(x: BDM[Double], label: BDM[Double]): (Array[(BDM[Double],
+  protected[neuralNetwork] def learn(x: BDM[Double], label: BDM[Double]): (Array[(BDM[Double],
     BDV[Double])], Double, Double) = {
     val batchSize = x.cols
     val in = new Array[BDM[Double]](numLayer)
@@ -117,30 +117,15 @@ class MLP(
       grads(layer) = innerLayers(layer).backward(input, delta(layer))
     }
 
-    val ce = crossEntropy(out.last, label)
-    (grads, ce, batchSize.toDouble)
-  }
-
-  private def crossEntropy(out: BDM[Double], label: BDM[Double]): Double = {
-    assert(label.rows == out.rows)
-    assert(label.cols == out.cols)
-    var cost = 0D
-    for (i <- 0 until out.rows) {
-      for (j <- 0 until out.cols) {
-        val a = label(i, j)
-        var b = out(i, j)
-        if (b == 0) {
-          b += 1e-15
-        } else if (b == 1D) {
-          b -= 1e-15
-        }
-        cost += a * math.log(b) + (1 - a) * math.log1p(1 - b)
-      }
+    val cost = if (innerLayers.last.layerType == "softMax") {
+      Layer.crossEntropy(out.last, label)
+    } else {
+      Layer.meanSquaredError(out.last, label)
     }
-    (0D - cost) / out.rows
+    (grads, cost, batchSize.toDouble)
   }
 
-  private def dropOutMask(cols: Int): Array[BDM[Double]] = {
+  protected[neuralNetwork] def dropOutMask(cols: Int): Array[BDM[Double]] = {
     val masks = new Array[BDM[Double]](numLayer - 1)
     for (layer <- 0 until numLayer - 1) {
       val dropoutRate = layerDropoutRate(layer)
@@ -157,15 +142,15 @@ class MLP(
   }
 
   private def layerDropoutRate(layer: Int): Double = {
-    if (layer == 0 && inputLayerDropoutRate > 0) {
-      inputLayerDropoutRate
+    if (layer == 0 && inputDropout > 0) {
+      inputDropout
     }
     else {
-      hiddenLayersDropoutRate
+      hiddenDropout
     }
   }
 
-  private[mllib] def assign(newNN: MLP): MLP = {
+  protected[neuralNetwork] def assign(newNN: MLP): MLP = {
     innerLayers.zip(newNN.innerLayers).foreach { case (oldLayer, newLayer) =>
       oldLayer.weight := newLayer.weight
       oldLayer.bias := newLayer.bias
@@ -230,7 +215,7 @@ object MLP extends Logging {
 
   def runSGD(
     data: RDD[(SV, SV)],
-    nn: MLP,
+    mlp: MLP,
     batchSize: Int,
     maxNumIterations: Int,
     fraction: Double,
@@ -238,21 +223,24 @@ object MLP extends Logging {
     weightCost: Double,
     rho: Double,
     epsilon: Double): MLP = {
-    val gradient = new MLPGradient(nn.topology, nn.hiddenLayersDropoutRate,
-      nn.inputLayerDropoutRate)
-    val updater = new MLPAdaDeltaUpdater(nn.topology, rho, epsilon)
+    val gradient = new MLPGradient(
+      mlp.topology,
+      mlp.innerLayers.map(_.layerType),
+      mlp.hiddenDropout,
+      mlp.inputDropout)
+    val updater = new MLPAdaDeltaUpdater(mlp.topology, rho, epsilon)
     val optimizer = new GradientDescent(gradient, updater).
       setMiniBatchFraction(fraction).
       setNumIterations(maxNumIterations).
       setRegParam(weightCost).
       setStepSize(learningRate)
 
-    val trainingRDD = toTrainingRDD(data, batchSize, nn.numInput, nn.numOut)
+    val trainingRDD = toTrainingRDD(data, batchSize, mlp.numInput, mlp.numOut)
     trainingRDD.persist(StorageLevel.MEMORY_AND_DISK).setName("MLP-dataBatch")
-    val weights = optimizer.optimize(trainingRDD, toVector(nn))
+    val weights = optimizer.optimize(trainingRDD, toVector(mlp))
     trainingRDD.unpersist()
-    fromVector(nn, weights)
-    nn
+    fromVector(mlp, weights)
+    mlp
   }
 
   @Experimental
@@ -276,8 +264,11 @@ object MLP extends Logging {
     maxNumIterations: Int,
     convergenceTol: Double,
     weightCost: Double): MLP = {
-    val gradient = new MLPGradient(nn.topology, nn.hiddenLayersDropoutRate,
-      nn.inputLayerDropoutRate)
+    val gradient = new MLPGradient(
+      nn.topology,
+      nn.innerLayers.map(_.layerType),
+      nn.hiddenDropout,
+      nn.inputDropout)
     val updater = new MLPUpdater(nn.topology)
     val optimizer = new LBFGS(gradient, updater).
       setConvergenceTol(convergenceTol).
@@ -421,33 +412,29 @@ object MLP extends Logging {
 
   private[mllib] def initLayers(topology: Array[Int]): Array[Layer] = {
     val numLayer = topology.length - 1
-    val layers = new Array[(BDM[Double], BDV[Double])](numLayer)
+    val layers = new Array[Layer](numLayer)
     for (layer <- (0 until numLayer).reverse) {
       val numIn = topology(layer)
       val numOut = topology(layer + 1)
       layers(layer) = if (layer == numLayer - 1) {
-        (Layer.initializeWeight(numIn, numOut), Layer.initializeBias(numOut))
+        new SoftMaxLayer(numIn, numOut)
       }
       else {
-        (Layer.initUniformDistWeight(numIn, numOut, 0.0, 0.01),
-          Layer.initializeBias(numOut))
+        new ReLuLayer(numIn, numOut)
       }
       println(s"layers($layer) = ${numIn} * ${numOut}")
     }
-    initLayers(layers)
+    layers
   }
 
-  private[mllib] def initLayers(w: Array[(BDM[Double], BDV[Double])]): Array[Layer] = {
-    val numLayer = w.length
+  private[mllib] def initLayers(
+    params: Array[(BDM[Double], BDV[Double])],
+    layerTypes: Array[String]): Array[Layer] = {
+    val numLayer = params.length
     val layers = new Array[Layer](numLayer)
     for (layer <- 0 until numLayer) {
-      val (weight, bias) = w(layer)
-      layers(layer) = if (layer == numLayer - 1) {
-        new SoftMaxLayer(weight, bias)
-      }
-      else {
-        new ReLuLayer(weight, bias)
-      }
+      val (weight, bias) = params(layer)
+      layers(layer) = Layer.initializeLayer(weight, bias, layerTypes(layer))
     }
     layers
   }
@@ -481,11 +468,12 @@ object MLP extends Logging {
 
 private[mllib] class MLPGradient(
   val topology: Array[Int],
+  val layerTypes: Array[String],
   val hiddenLayersDropoutRate: Double,
   val inputLayerDropoutRate: Double) extends Gradient {
 
   override def compute(data: SV, label: Double, weights: SV): (SV, Double) = {
-    val layers = MLP.initLayers(MLP.vectorToStructure(topology, weights))
+    val layers = MLP.initLayers(MLP.vectorToStructure(topology, weights), layerTypes)
     val mlp = new MLP(layers, hiddenLayersDropoutRate, inputLayerDropoutRate)
     val numIn = mlp.numInput
     val numLabel = mlp.numOut
@@ -561,7 +549,7 @@ private[mllib] class MLPAdaDeltaUpdater(
   val topology: Array[Int],
   rho: Double = 0.99,
   epsilon: Double = 1e-8,
-  momentum: Double = 0.9) extends AdaDeltaUpdater(rho, epsilon, momentum) {
+  momentum: Double = 0.5) extends AdaDeltaUpdater(rho, epsilon, momentum) {
   override protected def l2(
     weightsOld: SV,
     gradient: SV,
