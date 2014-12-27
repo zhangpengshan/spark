@@ -89,8 +89,6 @@ object StackedRBM extends Logging {
     learningRate: Double,
     weightCost: Double,
     maxLayer: Int = -1): StackedRBM = {
-    val sc = data.context
-    val numInput = stackedRBM.numInput
     val trainLayer = if (maxLayer > -1D) {
       maxLayer
     } else {
@@ -99,41 +97,28 @@ object StackedRBM extends Logging {
 
     for (layer <- 0 until trainLayer) {
       logInfo(s"Train ($layer/$trainLayer)")
-      val broadcastStackedRBM = sc.broadcast(stackedRBM)
-      val dataBatch = batches(data, broadcastStackedRBM, batchSize, numInput, layer)
+      val broadcast = data.context.broadcast(stackedRBM)
+      val dataBatch = forward(data, broadcast, layer)
       val rbm = stackedRBM.innerRBMs(layer)
-      dataBatch.persist(StorageLevel.MEMORY_AND_DISK).setName(s"dataBatch-$layer")
       RBM.train(dataBatch, batchSize, numIteration, rbm,
         fraction, learningRate, weightCost)
-      broadcastStackedRBM.destroy(blocking = false)
-      dataBatch.unpersist(blocking = false)
+      // broadcast.destroy(blocking = false)
     }
-
     stackedRBM
   }
 
-  private[mllib] def batches(
+  private def forward(
     data: RDD[SV],
-    broadcastStackedRBM: Broadcast[StackedRBM],
-    batchSize: Int,
-    numInput: Int,
-    toLayer: Int
-    ): RDD[SV] = {
-    val dataBatch = data.mapPartitions { itr =>
-      val stackedRBM = broadcastStackedRBM.value
-      itr.grouped(batchSize).flatMap { seq =>
-        var x = BDM.zeros[Double](numInput, seq.size)
-        seq.zipWithIndex.foreach { case (v, i) =>
-          x(::, i) :+= v.toBreeze
-        }
-        x = stackedRBM.forward(x, toLayer)
-        (0 until seq.size).map { i =>
-          Vectors.fromBreeze(x(::, i))
-        }
+    broadcast: Broadcast[StackedRBM],
+    toLayer: Int): RDD[SV] = {
+    data.mapPartitions { itr =>
+      val stackedRBM = broadcast.value
+      itr.map { data =>
+        val input = new BDM[Double](1, data.size, data.toArray).t
+        val x = stackedRBM.forward(input, toLayer)
+        Vectors.fromBreeze(x(::, 0))
       }
-
     }
-    dataBatch
   }
 
   def initializeRBMs(topology: Array[Int]): Array[RBM] = {
