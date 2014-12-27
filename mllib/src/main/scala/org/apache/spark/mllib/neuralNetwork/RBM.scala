@@ -24,7 +24,7 @@ import org.apache.commons.math3.random.JDKRandomGenerator
 
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.Logging
-import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV}
+import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV, BLAS}
 import org.apache.spark.mllib.optimization.{Gradient, GradientDescent}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.util.Utils
@@ -221,49 +221,20 @@ object RBM extends Logging {
     epsilon: Double): RBM = {
     val numVisible = rbm.numIn
     val numHidden = rbm.numOut
-    val gradient = new RBMGradient(rbm.numIn, rbm.numOut, rbm.dropoutRate)
+    val gradient = new RBMGradient(rbm.numIn, rbm.numOut, rbm.dropoutRate, batchSize)
     val updater = new RBMAdaDeltaUpdater(numVisible, numHidden, rho, epsilon)
     val optimizer = new GradientDescent(gradient, updater).
       setMiniBatchFraction(fraction).
       setNumIterations(maxNumIterations).
       setRegParam(weightCost).
       setStepSize(learningRate)
-    val trainingRDD = if (batchSize > 1) {
-      batchVector(data, batchSize, numVisible).map(t => (0D, t))
-    } else {
-      data.map(t => (0D, t))
-    }
+    val trainingRDD = data.map(t => (0D, t))
     // TODO: the related jira SPARK-4526
     trainingRDD.persist(StorageLevel.MEMORY_AND_DISK).setName("RBM-dataBatch")
     val weights = optimizer.optimize(trainingRDD, toVector(rbm))
     trainingRDD.unpersist()
     fromVector(rbm, weights)
     rbm
-  }
-
-  private[mllib] def batchMatrix(
-    data: RDD[SV],
-    batchSize: Int,
-    numVisible: Int): RDD[BDM[Double]] = {
-    val dataBatch = data.mapPartitions { itr =>
-      itr.grouped(batchSize).map { seq =>
-        val batch = BDM.zeros[Double](numVisible, seq.size)
-        seq.zipWithIndex.foreach { case (v, i) =>
-          batch(::, i) := v.toBreeze
-        }
-        batch
-      }
-    }
-    dataBatch
-  }
-
-  private[mllib] def batchVector(
-    data: RDD[SV],
-    batchSize: Int,
-    numVisible: Int): RDD[SV] = {
-    batchMatrix(data, batchSize, numVisible).map { t =>
-      new SDV(t.toArray)
-    }
   }
 
   private[mllib] def fromVector(rbm: RBM, weights: SV): Unit = {
@@ -347,29 +318,13 @@ object RBM extends Logging {
 private[mllib] class RBMGradient(
   val numIn: Int,
   val numOut: Int,
-  val dropoutRate: Double) extends Gradient {
+  val dropoutRate: Double,
+  val batchSize: Int) extends Gradient {
   override def compute(data: SV, label: Double, weights: SV): (SV, Double) = {
     val (weight, visibleBias, hiddenBias) = RBM.vectorToStructure(numIn, numOut, weights)
     val rbm = new RBM(weight, visibleBias, hiddenBias, dropoutRate)
-
-    val input = if (data.size > numIn) {
-      val numCol = data.size / numIn
-      new BDM[Double](numIn, numCol, data.toArray)
-    }
-    else {
-      new BDV(data.toArray, 0, 1, numIn).toDenseMatrix.t
-    }
-    RBM.fromVector(rbm, weights)
-
-    var (gradWeight, gradVisibleBias, gradHiddenBias, error, numCol) = rbm.learn(input)
-    if (numCol != 1D) {
-      val scale = 1D / numCol
-      gradWeight :*= scale
-      gradVisibleBias :*= scale
-      gradHiddenBias :*= scale
-      error *= scale
-    }
-
+    val input = new BDM[Double](1, numIn, data.toArray).t
+    val (gradWeight, gradVisibleBias, gradHiddenBias, error, _) = rbm.learn(input)
     (RBM.structureToVector(gradWeight, gradVisibleBias, gradHiddenBias), error)
   }
 
@@ -379,8 +334,32 @@ private[mllib] class RBMGradient(
     weights: SV,
     cumGradient: SV): Double = {
     val (grad, err) = compute(data, label, weights)
-    cumGradient.toBreeze += grad.toBreeze
+    BLAS.axpy(1, grad, cumGradient)
     err
+  }
+
+  override def compute(
+    iter: Iterator[(Double, SV)],
+    weights: SV,
+    cumGradient: SV): (Long, Double) = {
+    val (weight, visibleBias, hiddenBias) = RBM.vectorToStructure(numIn, numOut, weights)
+    val rbm = new RBM(weight, visibleBias, hiddenBias, dropoutRate)
+    var loss = 0D
+    var count = 0L
+    iter.map(_._2).grouped(batchSize).foreach { seq =>
+      val numCol = seq.size
+      val input: BDM[Double] = BDM.zeros(numIn, numCol)
+      seq.zipWithIndex.foreach { case (data, index) =>
+        assert(data.size == numIn)
+        input(::, index) := data.toBreeze
+      }
+      var (gradWeight, gradVisibleBias, gradHiddenBias, error, _) = rbm.learn(input)
+      val w = RBM.structureToVector(gradWeight, gradVisibleBias, gradHiddenBias)
+      BLAS.axpy(1, w, cumGradient)
+      loss += error
+      count += numCol
+    }
+    (count, loss)
   }
 }
 

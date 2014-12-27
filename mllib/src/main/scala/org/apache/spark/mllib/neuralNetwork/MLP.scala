@@ -21,12 +21,13 @@ import java.util.Random
 
 import scala.collection.JavaConversions._
 
-import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM, axpy => brzAxpy,
-argmax => brzArgMax, max => brzMax, sum => brzSum}
+import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, DenseMatrix => BDM,
+axpy => brzAxpy, argmax => brzArgMax, max => brzMax, sum => brzSum}
 
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.Logging
-import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV, Vectors, BLAS}
+import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV, SparseVector => SSV,
+Vectors, BLAS}
 import org.apache.spark.mllib.optimization.{Gradient, Updater, LBFGS, GradientDescent}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.rdd.RDD
@@ -227,7 +228,8 @@ object MLP extends Logging {
       mlp.topology,
       mlp.innerLayers.map(_.layerType),
       mlp.hiddenDropout,
-      mlp.inputDropout)
+      mlp.inputDropout,
+      batchSize)
     val updater = new MLPAdaDeltaUpdater(mlp.topology, rho, epsilon)
     val optimizer = new GradientDescent(gradient, updater).
       setMiniBatchFraction(fraction).
@@ -235,7 +237,7 @@ object MLP extends Logging {
       setRegParam(weightCost).
       setStepSize(learningRate)
 
-    val trainingRDD = toTrainingRDD(data, batchSize, mlp.numInput, mlp.numOut)
+    val trainingRDD = toTrainingRDD(data)
     trainingRDD.persist(StorageLevel.MEMORY_AND_DISK).setName("MLP-dataBatch")
     val weights = optimizer.optimize(trainingRDD, toVector(mlp))
     trainingRDD.unpersist()
@@ -268,14 +270,15 @@ object MLP extends Logging {
       nn.topology,
       nn.innerLayers.map(_.layerType),
       nn.hiddenDropout,
-      nn.inputDropout)
+      nn.inputDropout,
+      batchSize)
     val updater = new MLPUpdater(nn.topology)
     val optimizer = new LBFGS(gradient, updater).
       setConvergenceTol(convergenceTol).
       setNumIterations(maxNumIterations).
       setRegParam(weightCost)
 
-    val trainingRDD = toTrainingRDD(data, batchSize, nn.numInput, nn.numOut)
+    val trainingRDD = toTrainingRDD(data)
     trainingRDD.persist(StorageLevel.MEMORY_AND_DISK).setName("MLP-dataBatch")
     val weights = optimizer.optimize(trainingRDD, toVector(nn))
     trainingRDD.unpersist()
@@ -347,31 +350,7 @@ object MLP extends Logging {
     sumError / count
   }
 
-  private def toTrainingRDD(
-    data: RDD[(SV, SV)],
-    batchSize: Int,
-    numInput: Int,
-    numOut: Int): RDD[(Double, SV)] = {
-    if (batchSize > 1) {
-      batchVector(data, batchSize, numInput, numOut).map(t => (0D, t))
-    }
-    else {
-      data.map { case (input, label) =>
-        val sumLen = input.size + label.size
-        val data = new Array[Double](sumLen)
-        var offset = 0
-        System.arraycopy(input.toArray, 0, data, offset, input.size)
-        offset += input.size
-
-        System.arraycopy(label.toArray, 0, data, offset, label.size)
-        offset += label.size
-
-        (0D, new SDV(data))
-      }
-    }
-  }
-
-  private[mllib] def batchMatrix(
+  private def batchMatrix(
     data: RDD[(SV, SV)],
     batchSize: Int,
     numInput: Int,
@@ -381,8 +360,8 @@ object MLP extends Logging {
         val x = BDM.zeros[Double](numInput, seq.size)
         val y = BDM.zeros[Double](numOut, seq.size)
         seq.zipWithIndex.foreach { case (v, i) =>
-          x(::, i) :+= v._1.toBreeze
-          y(::, i) :+= v._2.toBreeze
+          x(::, i) := v._1.toBreeze
+          y(::, i) := v._2.toBreeze
         }
         (x, y)
       }
@@ -390,23 +369,18 @@ object MLP extends Logging {
     dataBatch
   }
 
-  private[mllib] def batchVector(
-    data: RDD[(SV, SV)],
-    batchSize: Int,
-    numInput: Int,
-    numOut: Int): RDD[SV] = {
-    batchMatrix(data, batchSize, numInput, numOut).map { t =>
-      val input = t._1
-      val label = t._2
-      val sumLen = (input.rows + label.rows) * input.cols
-      val data = new Array[Double](sumLen)
-      var offset = 0
-      System.arraycopy(input.toArray, 0, data, offset, input.rows * input.cols)
-      offset += input.rows * input.cols
-
-      System.arraycopy(label.toArray, 0, data, offset, label.rows * input.cols)
-      offset += label.rows * label.cols
-      new SDV(data)
+  private def toTrainingRDD(data: RDD[(SV, SV)]): RDD[(Double, SV)] = {
+    data.map { case (input, label) =>
+      if (input.isInstanceOf[SSV]) {
+        val si = input.toBreeze.asInstanceOf[BSV[Double]]
+        val sl = BSV.zeros[Double](label.size)
+        sl := label.toBreeze
+        (0D, Vectors.fromBreeze(BSV.vertcat(si, sl)))
+      } else {
+        val di = input.toBreeze.toDenseVector
+        val dl = label.toBreeze.toDenseVector
+        (0D, Vectors.fromBreeze(BDV.vertcat(di, dl)))
+      }
     }
   }
 
@@ -470,36 +444,19 @@ private[mllib] class MLPGradient(
   val topology: Array[Int],
   val layerTypes: Array[String],
   val hiddenLayersDropoutRate: Double,
-  val inputLayerDropoutRate: Double) extends Gradient {
+  val inputLayerDropoutRate: Double,
+  val batchSize: Int) extends Gradient {
 
   override def compute(data: SV, label: Double, weights: SV): (SV, Double) = {
     val layers = MLP.initLayers(MLP.vectorToStructure(topology, weights), layerTypes)
     val mlp = new MLP(layers, hiddenLayersDropoutRate, inputLayerDropoutRate)
     val numIn = mlp.numInput
     val numLabel = mlp.numOut
-
-    var input: BDM[Double] = null
-    var label: BDM[Double] = null
+    assert(data.size == numIn + numLabel)
     val batchedData = data.toArray
-    if (data.size != numIn + numLabel) {
-      val numCol = data.size / (numIn + numLabel)
-      input = new BDM[Double](numIn, numCol, batchedData)
-      label = new BDM[Double](numLabel, numCol, batchedData, numIn * numCol)
-    }
-    else {
-      input = new BDV(batchedData, 0, 1, numIn).toDenseMatrix.t
-      label = new BDV(batchedData, numIn, 1, numLabel).toDenseMatrix.t
-    }
-    var (grads, error, numCol) = mlp.learn(input, label)
-    if (numCol != 1D) {
-      val scale = 1D / numCol
-      grads.foreach { t =>
-        t._1 :*= scale
-        t._2 :*= scale
-      }
-      error *= scale
-    }
-
+    val input: BDM[Double] = new BDV(batchedData, 0, 1, numIn).toDenseMatrix.t
+    val label: BDM[Double] = new BDV(batchedData, numIn, 1, numLabel).toDenseMatrix.t
+    val (grads, error, _) = mlp.learn(input, label)
     (MLP.structureToVector(grads), error)
   }
 
@@ -509,10 +466,37 @@ private[mllib] class MLPGradient(
     weights: SV,
     cumGradient: SV): Double = {
     val (grad, err) = compute(data, label, weights)
-    cumGradient.toBreeze += grad.toBreeze
+    BLAS.axpy(1, grad, cumGradient)
     err
   }
 
+  override def compute(
+    iter: Iterator[(Double, SV)],
+    weights: SV,
+    cumGradient: SV): (Long, Double) = {
+    val layers = MLP.initLayers(MLP.vectorToStructure(topology, weights), layerTypes)
+    val mlp = new MLP(layers, hiddenLayersDropoutRate, inputLayerDropoutRate)
+    val numIn = mlp.numInput
+    val numLabel = mlp.numOut
+    var loss = 0D
+    var count = 0L
+    iter.map(_._2).grouped(batchSize).foreach { seq =>
+      val numCol = seq.size
+      val input: BDM[Double] = BDM.zeros(numIn, numCol)
+      val label: BDM[Double] = BDM.zeros(numLabel, numCol)
+      seq.zipWithIndex.foreach { case (data, index) =>
+        assert(data.size == numIn + numLabel)
+        val vector = data.toBreeze
+        input(::, index) := vector(0 until numIn)
+        label(::, index) := vector(numIn until numIn + numLabel)
+      }
+      val (grads, error, _) = mlp.learn(input, label)
+      BLAS.axpy(1, MLP.structureToVector(grads), cumGradient)
+      loss += error
+      count += numCol
+    }
+    (count, loss)
+  }
 }
 
 private[mllib] class MLPUpdater(val topology: Array[Int]) extends Updater {
@@ -531,10 +515,10 @@ private[mllib] class MLPUpdater(val topology: Array[Int]) extends Updater {
 @Experimental
 private[mllib] class MLPAdaGradUpdater(
   val topology: Array[Int],
-  rho: Double = 0,
+  rho: Double = 0D,
   epsilon: Double = 1e-2,
   gamma: Double = 1e-1,
-  momentum: Double = 0) extends AdaGradUpdater(rho, epsilon, gamma, momentum) {
+  momentum: Double = 0D) extends AdaGradUpdater(rho, epsilon, gamma, momentum) {
   override protected def l2(
     weightsOld: SV,
     gradient: SV,
@@ -549,7 +533,7 @@ private[mllib] class MLPAdaDeltaUpdater(
   val topology: Array[Int],
   rho: Double = 0.99,
   epsilon: Double = 1e-8,
-  momentum: Double = 0.5) extends AdaDeltaUpdater(rho, epsilon, momentum) {
+  momentum: Double = 0.9) extends AdaDeltaUpdater(rho, epsilon, momentum) {
   override protected def l2(
     weightsOld: SV,
     gradient: SV,
