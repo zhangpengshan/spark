@@ -370,7 +370,7 @@ private[mllib] class RBMAdaGradUpdater(
   rho: Double = 0,
   epsilon: Double = 1e-2,
   gamma: Double = 1e-1,
-  momentum: Double = 0) extends AdaGradUpdater(rho, epsilon, gamma, momentum) {
+  momentum: Double = 0.9) extends AdaGradUpdater(rho, epsilon, gamma, momentum) {
 
   override protected def l2(
     weightsOld: SV,
