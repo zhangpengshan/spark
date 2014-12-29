@@ -111,13 +111,17 @@ object StackedRBM extends Logging {
     data: RDD[SV],
     broadcast: Broadcast[StackedRBM],
     toLayer: Int): RDD[SV] = {
-    data.mapPartitions { itr =>
-      val stackedRBM = broadcast.value
-      itr.map { data =>
-        val input = new BDM[Double](1, data.size, data.toArray).t
-        val x = stackedRBM.forward(input, toLayer)
-        Vectors.fromBreeze(x(::, 0))
+    if (toLayer > 0) {
+      data.mapPartitions { itr =>
+        val stackedRBM = broadcast.value
+        itr.map { data =>
+          val input = new BDM[Double](1, data.size, data.toArray).t
+          val x = stackedRBM.forward(input, toLayer)
+          Vectors.fromBreeze(x(::, 0))
+        }
       }
+    } else {
+      data
     }
   }
 
