@@ -63,7 +63,7 @@ class StackedRBM(val innerRBMs: Array[RBM])
     for (layer <- 0 until numLayer) {
       layers(layer) = innerRBMs(layer).hiddenLayer
     }
-    new MLP(layers, innerRBMs.last.dropoutRate, innerRBMs.head.dropoutRate)
+    new MLP(layers, innerRBMs.map(_.dropoutRate))
   }
 }
 

@@ -25,7 +25,7 @@ with MnistDatasetSuite with Matchers {
   test("StackedAutoEncoder") {
     val (data, numVisible) = mnistTrainDataset(2500)
     val dbn = new StackedAutoEncoder(Array(numVisible, 100, numVisible))
-    StackedAutoEncoder.pretrain(data.map(_._1), 100, 1000, dbn, 0.1, 0.5, 0.0)
+    StackedAutoEncoder.pretrain(data.map(_._1), 100, 1000, dbn, 0.1, 0.1, 0.0)
     StackedAutoEncoder.finetune(data.map(_._1), 100, 8000, dbn, 0.1, 0.5, 0.0)
   }
 }

@@ -369,6 +369,27 @@ private[mllib] class GaussianLayer(
   }
 }
 
+private[mllib] class Identity(
+  val weight: BDM[Double],
+  val bias: BDV[Double]) extends Layer with Logging {
+
+  def this(numIn: Int, numOut: Int) {
+    this(initUniformDistWeight(numIn, numOut, 0D, 0.01),
+      initializeBias(numOut))
+  }
+
+  def layerType: String = "identity"
+
+  def computeNeuron(tmp: BDM[Double]): Unit = {}
+
+  def computeNeuronPrimitive(
+    temp: BDM[Double],
+    output: BDM[Double]): Unit = {}
+
+  protected[neuralNetwork] override def sample(input: BDM[Double]): BDM[Double] = {
+    input.mapValues(v => v + rand.nextGaussian())
+  }
+}
 
 private[mllib] object Layer {
 
@@ -391,6 +412,8 @@ private[mllib] object Layer {
         new TanhLayer(weight, bias)
       case "sigmoid" =>
         new SigmoidLayer(weight, bias)
+      case "identity" =>
+        new Identity(weight, bias)
       case _ =>
         throw new IllegalArgumentException("layerType is not correct")
     }
