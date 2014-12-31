@@ -21,8 +21,8 @@ import breeze.linalg.{DenseVector => BDV, DenseMatrix => BDM, sum => brzSum}
 
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.Logging
-import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV, Vectors}
-import org.apache.spark.storage.StorageLevel
+import org.apache.spark.mllib.linalg.{DenseMatrix => SDM, SparseMatrix => SSM, Matrix => SM,
+SparseVector => SSV, DenseVector => SDV, Vector => SV, Vectors, Matrices, BLAS}
 import org.apache.spark.rdd.RDD
 
 class StackedRBM(val innerRBMs: Array[RBM])
@@ -37,7 +37,7 @@ class StackedRBM(val innerRBMs: Array[RBM])
 
   def numOut = innerRBMs.last.numOut
 
-  def forward(visible: BDM[Double], toLayer: Int): BDM[Double] = {
+  def forward(visible: SM, toLayer: Int): SM = {
     var x = visible
     for (layer <- 0 until toLayer) {
       x = innerRBMs(layer).forward(x)
@@ -45,7 +45,7 @@ class StackedRBM(val innerRBMs: Array[RBM])
     x
   }
 
-  def forward(visible: BDM[Double]): BDM[Double] = {
+  def forward(visible: SM): SM = {
     forward(visible, numLayer)
   }
 
@@ -115,8 +115,8 @@ object StackedRBM extends Logging {
       data.mapPartitions { itr =>
         val stackedRBM = broadcast.value
         itr.map { data =>
-          val input = new BDM[Double](1, data.size, data.toArray).t
-          val x = stackedRBM.forward(input, toLayer)
+          val input = new SDM(data.size, 1, data.toArray)
+          val x = stackedRBM.forward(input, toLayer).toBreeze.toDenseMatrix
           Vectors.fromBreeze(x(::, 0))
         }
       }
@@ -129,7 +129,14 @@ object StackedRBM extends Logging {
     val numLayer = topology.length - 1
     val innerRBMs: Array[RBM] = new Array[RBM](numLayer)
     for (layer <- 0 until numLayer) {
-      innerRBMs(layer) = new RBM(topology(layer), topology(layer + 1))
+      val dropout = if (layer == 0) {
+        0.2
+      } else if (layer < numLayer - 1) {
+        0.5
+      } else {
+        0.0
+      }
+      innerRBMs(layer) = new RBM(topology(layer), topology(layer + 1), dropout)
       println(s"innerRBMs($layer) = ${innerRBMs(layer).numIn} * ${innerRBMs(layer).numOut}")
     }
     innerRBMs

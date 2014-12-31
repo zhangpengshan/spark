@@ -20,7 +20,8 @@ package org.apache.spark.mllib.neuralNetwork
 import breeze.linalg.{DenseMatrix => BDM}
 
 import org.apache.spark.Logging
-import org.apache.spark.mllib.linalg.{Vector => SV}
+import org.apache.spark.mllib.linalg.{DenseMatrix => SDM, SparseMatrix => SSM, Matrix => SM,
+SparseVector => SSV, DenseVector => SDV, Vector => SV, Vectors, Matrices, BLAS}
 import org.apache.spark.rdd.RDD
 
 class StackedAutoEncoder(val stackedRBM: StackedRBM)
@@ -41,7 +42,7 @@ class StackedAutoEncoder(val stackedRBM: StackedRBM)
 
   def numLayer = stackedRBM.numLayer
 
-  def forward(visible: BDM[Double]): BDM[Double] = {
+  def forward(visible: SM): SM = {
     stackedRBM.forward(visible, stackedRBM.numLayer / 2 + 1)
   }
 }

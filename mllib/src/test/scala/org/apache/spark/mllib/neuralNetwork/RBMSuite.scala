@@ -24,7 +24,7 @@ class RBMSuite extends FunSuite with MnistDatasetSuite with Matchers {
 
   test("RBM") {
     val (data, numVisible) = mnistTrainDataset(2500)
-    val rbm = RBM.train(data.map(_._1), 23, 1000, numVisible, 256, 0.1, 0.05, 0)
+    val rbm = RBM.train(data.map(_._1), 23, 1000, numVisible, 256, 0.1, 0.05, 0.001)
   }
 
 }

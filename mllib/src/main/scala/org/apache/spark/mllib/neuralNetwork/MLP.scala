@@ -19,15 +19,13 @@ package org.apache.spark.mllib.neuralNetwork
 
 import java.util.Random
 
-import scala.collection.JavaConversions._
-
-import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, DenseMatrix => BDM,
-axpy => brzAxpy, argmax => brzArgMax, max => brzMax, sum => brzSum}
+import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, Vector => BV, DenseMatrix => BDM, Matrix => BM,
+axpy => brzAxpy, argmax => brzArgMax, max => brzMax, sum => brzSum, norm => brzNorm}
 
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.Logging
-import org.apache.spark.mllib.linalg.{Vector => SV, DenseVector => SDV, SparseVector => SSV,
-Vectors, BLAS}
+import org.apache.spark.mllib.linalg.{DenseMatrix => SDM, SparseMatrix => SSM, Matrix => SM,
+SparseVector => SSV, DenseVector => SDV, Vector => SV, Vectors, Matrices, BLAS}
 import org.apache.spark.mllib.optimization.{Gradient, Updater, LBFGS, GradientDescent}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.rdd.RDD
@@ -68,26 +66,25 @@ class MLP(
 
   def numOut = innerLayers.last.numOut
 
-  def predict(x: BDM[Double]): BDM[Double] = {
+  def predict(x: SM): SM = {
     var output = x
     for (layer <- 0 until numLayer) {
       output = innerLayers(layer).forward(output)
       val dropoutRate = dropout(layer)
       if (dropoutRate > 0D) {
-        output :*= (1D - dropoutRate)
+        output.toBreeze :*= (1D - dropoutRate)
       }
     }
     output
   }
 
-  protected[neuralNetwork] def learn(x: BDM[Double], label: BDM[Double]): (Array[(BDM[Double],
-    BDV[Double])], Double, Double) = {
-    val batchSize = x.cols
-    val in = new Array[BDM[Double]](numLayer)
-    val out = new Array[BDM[Double]](numLayer)
-    val delta = new Array[BDM[Double]](numLayer)
-    val grads = new Array[(BDM[Double], BDV[Double])](numLayer)
-    val dropOutMasks: Array[BDM[Double]] = dropOutMask(batchSize)
+  protected[neuralNetwork] def learn(x: SM, label: SM): (Array[(SM, SV)], Double, Double) = {
+    val batchSize = x.numCols
+    val in = new Array[SM](numLayer)
+    val out = new Array[SM](numLayer)
+    val delta = new Array[SM](numLayer)
+    val grads = new Array[(SM, SV)](numLayer)
+    val dropOutMasks: Array[SM] = dropOutMask(batchSize)
 
     for (layer <- 0 until numLayer) {
       val input = if (layer == 0) {
@@ -99,8 +96,8 @@ class MLP(
 
       val output = innerLayers(layer).forward(input)
       if (dropOutMasks(layer) != null) {
-        assert(output.rows == dropOutMasks(layer).rows)
-        output :*= dropOutMasks(layer)
+        assert(output.numRows == dropOutMasks(layer).numRows)
+        output.toBreeze :*= dropOutMasks(layer).toBreeze
       }
       out(layer) = output
     }
@@ -114,7 +111,7 @@ class MLP(
         innerLayers(layer).computeDeltaMiddle(output, innerLayers(layer + 1), delta(layer + 1))
       }
       if (dropOutMasks(layer) != null) {
-        delta(layer) :*= dropOutMasks(layer)
+        delta(layer).toBreeze :*= dropOutMasks(layer).toBreeze
       }
       grads(layer) = innerLayers(layer).backward(input, delta(layer))
     }
@@ -127,13 +124,13 @@ class MLP(
     (grads, cost, batchSize.toDouble)
   }
 
-  protected[neuralNetwork] def dropOutMask(cols: Int): Array[BDM[Double]] = {
-    val masks = new Array[BDM[Double]](numLayer)
+  protected[neuralNetwork] def dropOutMask(cols: Int): Array[SM] = {
+    val masks = new Array[SM](numLayer)
     for (layer <- 0 until numLayer) {
       val dropoutRate = dropout(layer)
       masks(layer) = if (dropoutRate > 0) {
         val rows = innerLayers(layer).numOut
-        val mask = new BDM[Double](rows, cols)
+        val mask = SDM.zeros(rows, cols)
         for (i <- 0 until rows) {
           for (j <- 0 until cols) {
             mask(i, j) = if (rand.nextDouble() > dropoutRate) 1D else 0D
@@ -149,8 +146,8 @@ class MLP(
 
   protected[neuralNetwork] def assign(newNN: MLP): MLP = {
     innerLayers.zip(newNN.innerLayers).foreach { case (oldLayer, newLayer) =>
-      oldLayer.weight := newLayer.weight
-      oldLayer.bias := newLayer.bias
+      oldLayer.weight.toBreeze := newLayer.weight.toBreeze
+      oldLayer.bias.toBreeze := newLayer.bias.toBreeze
     }
     this
   }
@@ -286,8 +283,8 @@ object MLP extends Logging {
     for (i <- 0 until structure.length) {
       val (weight, bias) = structure(i)
       val layer = layers(i)
-      layer.weight := weight
-      layer.bias := bias
+      layer.weight.toBreeze := weight.toBreeze
+      layer.bias.toBreeze := bias.toBreeze
 
     }
   }
@@ -296,15 +293,15 @@ object MLP extends Logging {
     structureToVector(nn.innerLayers.map(l => (l.weight, l.bias)))
   }
 
-  private[mllib] def structureToVector(grads: Array[(BDM[Double], BDV[Double])]): SV = {
+  private[mllib] def structureToVector(grads: Array[(SM, SV)]): SV = {
     val numLayer = grads.length
-    val sumLen = grads.map(m => m._1.rows * m._1.cols + m._2.length).sum
+    val sumLen = grads.map(m => m._1.numRows * m._1.numCols + m._2.size).sum
     val data = new Array[Double](sumLen)
     var offset = 0
     for (l <- 0 until numLayer) {
       val (gradWeight, gradBias) = grads(l)
-      val numIn = gradWeight.cols
-      val numOut = gradWeight.rows
+      val numIn = gradWeight.numCols
+      val numOut = gradWeight.numRows
       System.arraycopy(gradWeight.toArray, 0, data, offset, numOut * numIn)
       offset += numIn * numOut
       System.arraycopy(gradBias.toArray, 0, data, offset, numOut)
@@ -314,6 +311,29 @@ object MLP extends Logging {
   }
 
   private[mllib] def vectorToStructure(
+    topology: Array[Int],
+    weights: SV): Array[(SM, SV)] = {
+    val data = weights.toArray
+    val numLayer = topology.length - 1
+    val grads = new Array[(SM, SV)](numLayer)
+    var offset = 0
+    for (layer <- 0 until numLayer) {
+      val numIn = topology(layer)
+      val numOut = topology(layer + 1)
+
+      val weight = SDM.zeros(numOut, numIn)
+      System.arraycopy(data, offset, weight.values, 0, numIn * numOut)
+      offset += numIn * numOut
+
+      val bias = Vectors.zeros(numOut).asInstanceOf[SDV]
+      System.arraycopy(data, offset, bias.values, 0, numOut)
+      offset += numOut
+      grads(layer) = (weight, bias)
+    }
+    grads
+  }
+
+  private[mllib] def vectorToBreeze(
     topology: Array[Int],
     weights: SV): Array[(BDM[Double], BDV[Double])] = {
     val data = weights.toArray
@@ -336,7 +356,7 @@ object MLP extends Logging {
     val count = data.count()
     val dataBatches = batchMatrix(data, batchSize, nn.numInput, nn.numOut)
     val sumError = dataBatches.map { case (x, y) =>
-      val h = nn.predict(x)
+      val h = nn.predict(Matrices.fromBreeze(x)).toBreeze.toDenseMatrix
       (0 until h.cols).map(i => {
         if (brzArgMax(y(::, i)) == brzArgMax(h(::, i))) 0D else 1D
       }).sum
@@ -411,7 +431,7 @@ object MLP extends Logging {
   }
 
   private[mllib] def initLayers(
-    params: Array[(BDM[Double], BDV[Double])],
+    params: Array[(SM, SV)],
     layerTypes: Array[String]): Array[Layer] = {
     val numLayer = params.length
     val layers = new Array[Layer](numLayer)
@@ -431,8 +451,8 @@ object MLP extends Logging {
     regParam: Double): Double = {
     if (regParam > 0D) {
       var norm = 0D
-      val nn = MLP.vectorToStructure(topology, weightsOld)
-      val grads = MLP.vectorToStructure(topology, gradient)
+      val nn = MLP.vectorToBreeze(topology, weightsOld)
+      val grads = MLP.vectorToBreeze(topology, gradient)
       for (layer <- 0 until nn.length) {
         brzAxpy(regParam, nn(layer)._1, grads(layer)._1)
         for (i <- 0 until nn(layer)._1.rows) {
@@ -462,8 +482,8 @@ private[mllib] class MLPGradient(
     val numLabel = mlp.numOut
     assert(data.size == numIn + numLabel)
     val batchedData = data.toArray
-    val input: BDM[Double] = new BDV(batchedData, 0, 1, numIn).toDenseMatrix.t
-    val label: BDM[Double] = new BDV(batchedData, numIn, 1, numLabel).toDenseMatrix.t
+    val input = new SDM(numIn, 1, batchedData.slice(0, numIn))
+    val label = new SDM(numLabel, 1, batchedData.slice(numIn, numIn + numLabel))
     val (grads, error, _) = mlp.learn(input, label)
     (MLP.structureToVector(grads), error)
   }
@@ -490,15 +510,16 @@ private[mllib] class MLPGradient(
     var count = 0L
     iter.map(_._2).grouped(batchSize).foreach { seq =>
       val numCol = seq.size
-      val input: BDM[Double] = BDM.zeros(numIn, numCol)
-      val label: BDM[Double] = BDM.zeros(numLabel, numCol)
+      val input = BDM.zeros[Double](numIn, numCol)
+      val label = BDM.zeros[Double](numLabel, numCol)
+
       seq.zipWithIndex.foreach { case (data, index) =>
         assert(data.size == numIn + numLabel)
-        val vector = data.toBreeze
-        input(::, index) := vector(0 until numIn)
-        label(::, index) := vector(numIn until numIn + numLabel)
+        val brzVector = data.toBreeze
+        input(::, index) := brzVector(0 until numIn)
+        label(::, index) := brzVector(numIn until numIn + numLabel)
       }
-      val (grads, error, _) = mlp.learn(input, label)
+      val (grads, error, _) = mlp.learn(Matrices.fromBreeze(input), Matrices.fromBreeze(label))
       BLAS.axpy(1, MLP.structureToVector(grads), cumGradient)
       loss += error
       count += numCol
