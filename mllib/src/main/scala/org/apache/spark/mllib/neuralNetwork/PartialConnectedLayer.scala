@@ -106,26 +106,7 @@ class AveragePoolingLayer(
   }
 }
 
-abstract class ConvolutionalLayer(
-  val weight: SM,
-  val bias: SV,
-  val inChannels: Int,
-  val outChannels: Int,
-  val kernelRows: Int,
-  val kernelCols: Int) extends PartialConnectedLayer {
-
-  def this(
-    inChannels: Int,
-    outChannels: Int,
-    kernelRows: Int,
-    kernelCols: Int) {
-    this(initUniformDistKernel(inChannels, outChannels, kernelRows, kernelCols),
-      initializeBias(outChannels),
-      inChannels,
-      outChannels,
-      kernelRows,
-      kernelCols)
-  }
+trait ConvolutionalLayer extends PartialConnectedLayer {
 
   override def connTable: SM = Matrices.ones(inChannels, outChannels)
 
@@ -178,18 +159,25 @@ abstract class ConvolutionalLayer(
 }
 
 class CNNReLuLayer(
-  weight_ : SM,
-  bias_ : SV,
-  inChannels_ : Int,
-  outChannels_ : Int,
-  kernelRows_ : Int,
-  kernelCols_ : Int) extends ConvolutionalLayer(
-  weight_,
-  bias_,
-  inChannels_,
-  outChannels_,
-  kernelRows_,
-  kernelCols_) {
+  val weight: SM,
+  val bias: SV,
+  val inChannels: Int,
+  val outChannels: Int,
+  val kernelRows: Int,
+  val kernelCols: Int) extends ConvolutionalLayer {
+
+  def this(
+    inChannels: Int,
+    outChannels: Int,
+    kernelRows: Int,
+    kernelCols: Int) {
+    this(initUniformDistKernel(inChannels, outChannels, kernelRows, kernelCols),
+      initializeBias(outChannels),
+      inChannels,
+      outChannels,
+      kernelRows,
+      kernelCols)
+  }
 
   override def layerType: String = "cnn_reLu"
 
@@ -226,7 +214,7 @@ private[neuralNetwork] object PartialConnectedLayer {
     kernelRows: Int,
     kernelCols: Int): SM = {
     val w: SM = SDM.zeros(inChannels * kernelRows, outChannels * kernelRows)
-    FullyConnectedLayer.initUniformDistWeight(w, 0.01)
+    NNUtil.initUniformDistWeight(w, 0.01)
     w
   }
 

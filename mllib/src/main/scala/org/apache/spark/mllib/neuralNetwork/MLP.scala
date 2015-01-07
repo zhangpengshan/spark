@@ -102,24 +102,27 @@ class MLP(
       out(layer) = output
     }
 
-    for (layer <- (0 until numLayer).reverse) {
-      val input = in(layer)
-      val output = out(layer)
-      delta(layer) = if (layer == numLayer - 1) {
-        innerLayers(layer).computeDeltaTop(output, label)
+    for (i <- (0 until numLayer).reverse) {
+      val input = in(i)
+      val output = out(i)
+      val currentLayer = innerLayers(i)
+      delta(i) = if (i == numLayer - 1) {
+        currentLayer.outputError(output, label)
       } else {
-        innerLayers(layer).computeDeltaMiddle(output, innerLayers(layer + 1), delta(layer + 1))
+        val nextLayer = innerLayers(i + 1)
+        val nextDelta = delta(i + 1)
+        nextLayer.previousError(output, currentLayer, nextDelta)
       }
-      if (dropOutMasks(layer) != null) {
-        delta(layer).toBreeze :*= dropOutMasks(layer).toBreeze
+      if (dropOutMasks(i) != null) {
+        delta(i).toBreeze :*= dropOutMasks(i).toBreeze
       }
-      grads(layer) = innerLayers(layer).backward(input, delta(layer))
+      grads(i) = innerLayers(i).backward(input, delta(i))
     }
 
-    val cost = if (innerLayers.last.layerType == "softMax") {
-      Layer.crossEntropy(out.last, label)
+    val cost = if (innerLayers.last.layerType == "SoftMax") {
+      NNUtil.crossEntropy(out.last, label)
     } else {
-      Layer.meanSquaredError(out.last, label)
+      NNUtil.meanSquaredError(out.last, label)
     }
     (grads, cost, batchSize.toDouble)
   }
