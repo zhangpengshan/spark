@@ -29,27 +29,47 @@ import org.apache.spark.util.Utils
 
 import PartialConnectedLayer._
 
-
-trait BaseLayer extends Serializable {
+private[mllib] trait BaseLayer extends Serializable {
   def layerType: String
+
+  def forward(input: Array[SM]): Array[SM]
+
+  def backward(input: Array[SM], delta: Array[SM]): (SM, SV)
+
+  def outputError(output: Array[SM], label: Array[SM]): Array[SM] = {
+    val delta = new Array[SM](output.length)
+    for (i <- 0 until output.length) {
+      delta(i) = Matrices.fromBreeze(output(i).toBreeze - label(i).toBreeze)
+    }
+    computeNeuronPrimitive(delta, output)
+    delta
+  }
+
+  def previousError(
+    input: Array[SM],
+    previousLayer: BaseLayer,
+    currentDelta: Array[SM]): Array[SM]
+
+  def computeNeuron(temp: Array[SM]): Unit
+
+  def computeNeuronPrimitive(temp: Array[SM], output: Array[SM]): Unit
 }
 
-trait PoolingLayer extends BaseLayer {
-
+private[mllib] trait PoolingLayer extends BaseLayer {
   def scaleRows: Int
 
   def scaleCols: Int
 
-  def forward(input: Array[SM]): Array[SM]
+  def backward(input: Array[SM], delta: Array[SM]): (SM, SV) = {
+    null
+  }
 
-  def computeDelta(
-    output: Array[SM],
-    nextLayer: PartialConnectedLayer,
-    nextDelta: Array[SM]): Array[SM]
+  def computeNeuron(temp: Array[SM]): Unit = {}
+
+  def computeNeuronPrimitive(temp: Array[SM], output: Array[SM]): Unit = {}
 }
 
-trait PartialConnectedLayer extends BaseLayer {
-
+private[mllib] trait PartialConnectedLayer extends BaseLayer {
   def weight: SM
 
   def bias: SV
@@ -63,24 +83,12 @@ trait PartialConnectedLayer extends BaseLayer {
   def kernelRows: Int
 
   def kernelCols: Int
-
-  def forward(input: Array[SM]): Array[SM]
-
-  def backward(input: Array[SM], delta: Array[SM]): (SM, SV)
-
-  def computeDelta(output: Array[SM], nextLayer: PoolingLayer, nextDelta: Array[SM]): Array[SM]
-
-  def computeNeuron(temp: SM): Unit
-
-  def computeNeuronPrimitive(temp: SM, output: SM): Unit
-
 }
 
-class AveragePoolingLayer(
+private[mllib] class AveragePoolingLayer(
   val scaleRows: Int,
   val scaleCols: Int) extends PoolingLayer {
-
-  override def layerType: String = "average_pooling"
+  override def layerType: String = "AveragePooling"
 
   override def forward(input: Array[SM]): Array[SM] = {
     input.map(m =>
@@ -88,25 +96,21 @@ class AveragePoolingLayer(
     )
   }
 
-  override def computeDelta(
-    output: Array[SM],
-    nextLayer: PartialConnectedLayer,
-    nextDelta: Array[SM]): Array[SM] = {
-    val delta = new Array[SM](output.length)
-    for (i <- 0 until output.length) {
-      var z: BM[Double] = null
-      for (j <- 0 until nextDelta.length) {
-        val kernel = getKernel(nextLayer.weight, nextLayer.kernelRows, nextLayer.kernelCols, i, j)
-        val rk = rot180Matrix(kernel)
-        z = convnFull(nextDelta(j).toBreeze, rk, z)
-      }
-      delta(i) = Matrices.fromBreeze(z)
+  override def previousError(
+    input: Array[SM],
+    previousLayer: BaseLayer,
+    currentDelta: Array[SM]): Array[SM] = {
+    val preDelta = new Array[SM](input.length)
+    for (i <- 0 until input.length) {
+      preDelta(i) = Matrices.fromBreeze(expandMatrix(currentDelta(i).toBreeze,
+        scaleRows, scaleCols))
     }
-    delta
+    previousLayer.computeNeuronPrimitive(preDelta, input)
+    preDelta
   }
 }
 
-trait ConvolutionalLayer extends PartialConnectedLayer {
+private[mllib] trait ConvolutionalLayer extends PartialConnectedLayer {
 
   override def connTable: SM = Matrices.ones(inChannels, outChannels)
 
@@ -123,9 +127,9 @@ trait ConvolutionalLayer extends PartialConnectedLayer {
       assert(z != null)
       z :+= bias(i)
       val o = Matrices.fromBreeze(z)
-      computeNeuron(o)
       out(i) = o
     }
+    computeNeuron(out)
     out
   }
 
@@ -144,21 +148,27 @@ trait ConvolutionalLayer extends PartialConnectedLayer {
     (gradWeight, Vectors.fromBreeze(gradBias))
   }
 
-  override def computeDelta(
-    output: Array[SM],
-    nextLayer: PoolingLayer,
-    nextDelta: Array[SM]): Array[SM] = {
-    val detla = new Array[SM](outChannels)
-    for (i <- 0 until outChannels) {
-      detla(i) = Matrices.fromBreeze(expandMatrix(nextDelta(i).toBreeze,
-        nextLayer.scaleRows, nextLayer.scaleCols))
-      computeNeuronPrimitive(detla(i), output(i))
+  def previousError(
+    input: Array[SM],
+    previousLayer: BaseLayer,
+    currentDelta: Array[SM]): Array[SM] = {
+    val preDelta = new Array[SM](input.length)
+    for (i <- 0 until input.length) {
+      var z: BM[Double] = null
+      for (j <- 0 until currentDelta.length) {
+        val kernel = getKernel(weight, kernelRows, kernelCols, i, j)
+        val rk = rot180Matrix(kernel)
+        z = convnFull(currentDelta(j).toBreeze, rk, z)
+      }
+      preDelta(i) = Matrices.fromBreeze(z)
     }
-    detla
+    previousLayer.computeNeuronPrimitive(preDelta, input)
+    preDelta
   }
+
 }
 
-class CNNReLuLayer(
+private[mllib] class ReLuPartialConnectedLayer(
   val weight: SM,
   val bias: SV,
   val inChannels: Int,
@@ -181,29 +191,31 @@ class CNNReLuLayer(
 
   override def layerType: String = "cnn_reLu"
 
-  private def relu(tmp: SM): Unit = {
-    for (i <- 0 until tmp.numRows) {
-      for (j <- 0 until tmp.numCols) {
-        tmp(i, j) = math.max(0, tmp(i, j))
-      }
-    }
-  }
-
-  override def computeNeuron(temp: SM): Unit = {
-    relu(temp)
-  }
-
-  override def computeNeuronPrimitive(temp: SM, output: SM): Unit = {
-    for (i <- 0 until temp.numRows) {
-      for (j <- 0 until temp.numCols)
-        if (output(i, j) <= 0) {
-          temp(i, j) = 0
+  override def computeNeuron(temp: Array[SM]): Unit = {
+    temp.foreach(tmp => {
+      for (i <- 0 until tmp.numRows) {
+        for (j <- 0 until tmp.numCols) {
+          tmp(i, j) = math.max(0, tmp(i, j))
         }
+      }
+    })
+  }
+
+  override def computeNeuronPrimitive(temp: Array[SM], output: Array[SM]): Unit = {
+    for (index <- 0 until temp.length) {
+      val t = temp(index)
+      val o = output(index)
+      for (i <- 0 until t.numRows) {
+        for (j <- 0 until t.numCols)
+          if (o(i, j) <= 0) {
+            t(i, j) = 0
+          }
+      }
     }
   }
 }
 
-private[neuralNetwork] object PartialConnectedLayer {
+private[mllib] object PartialConnectedLayer {
   def initializeBias(numOut: Int): SV = {
     new SDV(new Array[Double](numOut))
   }
