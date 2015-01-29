@@ -59,14 +59,14 @@ class LDA private[mllib](
   }
 
   /**
-   * The number of documents in the corpus
+   * 语料库文档数
    */
   val numDocs = docVertices.count()
 
   /**
-   * The number of terms in the corpus
+   * 语料库总的词数(包含重复)
    */
-  private val sumTerms = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
+  private val sumToken = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
 
   @transient private val sc = corpus.vertices.context
   @transient private val seed = new Random().nextInt()
@@ -89,18 +89,15 @@ class LDA private[mllib](
 
   private def collectGlobalParameter(graph: Graph[VD, ED]): GlobalParameter = {
     val globalTopicCounter = collectGlobalCounter(graph, numTopics)
-    assert(brzSum(globalTopicCounter) == sumTerms)
-    val (denominator, denominator1) = denominatorBDV(globalTopicCounter,
-      sumTerms, numTerms, numTopics, alpha, beta, alphaAS)
-    val (t, t1) = LDA.t(globalTopicCounter, denominator, denominator1,
-      sumTerms, numTopics, alpha, beta, alphaAS)
-    GlobalParameter(globalTopicCounter, t, t1, denominator, denominator1)
+    assert(brzSum(globalTopicCounter) == sumToken)
+    val (t, t1) = LDA.t(globalTopicCounter, numTopics, beta)
+    GlobalParameter(globalTopicCounter, t, t1)
   }
 
   private def gibbsSampling(): Unit = {
     val broadcast = sc.broadcast(globalParameter)
-    val sampleCorpus = sampleTopics(corpus, broadcast,
-      innerIter + seed, sumTerms, numTopics, alpha, beta, alphaAS)
+    val sampleCorpus = sampleToken(corpus, broadcast,
+      innerIter + seed, sumToken, numTopics, numTerms, alpha, beta, alphaAS)
     sampleCorpus.persist(storageLevel)
 
     val counterCorpus = updateCounter(sampleCorpus, numTopics)
@@ -247,7 +244,7 @@ object LDA {
   private[mllib] type VD = BSV[Count]
 
   private[mllib] case class GlobalParameter(totalTopicCounter: BDV[Count],
-    t: BDV[Double], t1: BDV[Double], denominator: BDV[Double], denominator1: BDV[Double])
+    t: BDV[Double], t1: BDV[Double])
 
   private[mllib] case class Parameter(counter: BSV[Count], dist: BSV[Double], dist1: BSV[Double])
 
@@ -286,30 +283,13 @@ object LDA {
     topicModeling.saveModel(burnIn)
   }
 
-  // scalastyle:off
-  /**
-   * A multinomial distribution sampler, using roulette method to sample an Int back.
-   * Asymmetric Dirichlet Priors you can refer to the paper:
-   * "Rethinking LDA: Why Priors Matter", available at
-   * [[http://people.ee.duke.edu/~lcarin/Eric3.5.2010.pdf]]
-   *
-   * if you want to know more about the above codes, you can refer to the following formula:
-   * First), the original Gibbis sampling formula is :<img src="http://www.forkosh.com/mathtex.cgi? P(z^{(d)}_{n}|W, Z_{\backslash d,n}, \alpha u, \beta u)\propto P(w^{(d)}_{n}|z^{(d)}_{n},W_{\backslash d,n}, Z_{\backslash d,n}, \beta u) P(z^{(d)}_{n}|Z_{\backslash d,n}, \alpha u)"> (1)
-   * Second), using the Asymmetric Dirichlet Priors, the second term of formula (1) can be written as following:
-   * <img src="http://www.forkosh.com/mathtex.cgi? P(z^{(d)}_{N_{d+1}}=t|Z, \alpha, \alpha^{'}u)=\int dm P(z^{(d)}_{N_{d+1}}=t|Z, \alpha m)P(m|Z, \alpha^{'}u)=\frac{N_{t|d}+\alpha \frac{\widehat{N}_{T}+\frac{\alpha^{'}}{T}}{\Sigma_{t}\widehat{N}_{t}+ \alpha ^{'}}}{N_{d}+\alpha}"> (2)
-   * Third), in this code, we set the <img src="http://www.forkosh.com/mathtex.cgi? \alpha=\alpha^{'}">, you can set different value for them. Additionally, in our code the parameter "alpha" is equal to <img src="http://www.forkosh.com/mathtex.cgi?\alpha * T">;
-   * "adjustment" denote that if this is the current topic, you need to reduce number one from the corresponding term;
-   * <img src="http://www.forkosh.com/mathtex.cgi? ratio=\frac{\widehat{N}_{t}+\frac{\alpha^{'}}{T}}{\Sigma _{t}\widehat{N}_{t}+\alpha^{'}} \qquad asPrior = ratio * (alpha * numTopics)">;
-   * Finally), we put them into formula (1) to get the final Asymmetric Dirichlet Priors Gibbs sampling formula.
-   *
-   */
-  // scalastyle:on
-  private[mllib] def sampleTopics(
+  private[mllib] def sampleToken(
     graph: Graph[VD, ED],
     broadcast: Broadcast[GlobalParameter],
     innerIter: Long,
     sumTerms: Long,
     numTopics: Int,
+    numTerms: Int,
     alpha: Double,
     beta: Double,
     alphaAS: Double): Graph[VD, ED] = {
@@ -317,27 +297,23 @@ object LDA {
     graph.mapTriplets(
       (pid, iter) => {
         val gen = new XORShiftRandom(parts * innerIter + pid)
-        val d = BDV.zeros[Double](numTopics)
-        val d1 = BDV.zeros[Double](numTopics)
         val wMap = mutable.Map[VertexId, Parameter]()
-        val GlobalParameter(totalTopicCounter, t, t1, denominator, denominator1) = broadcast.value
+        val GlobalParameter(totalTopicCounter, t, t1) = broadcast.value
         iter.map {
           triplet =>
             val term = triplet.srcId
             val termTopicCounter = triplet.srcAttr
             val docTopicCounter = triplet.dstAttr
             val topics = triplet.attr
-            val parameter = wMap.getOrElseUpdate(term, w(totalTopicCounter, denominator,
-              denominator1, termTopicCounter, sumTerms, numTopics, alpha, beta, alphaAS))
-            this.d(denominator, denominator1, termTopicCounter, docTopicCounter,
-              d, d1, sumTerms, numTopics, beta, alphaAS)
-
+            val parameter = wMap.getOrElseUpdate(term, w(totalTopicCounter,
+              termTopicCounter, numTerms, beta))
             var i = 0
             while (i < topics.length) {
               val currentTopic = topics(i)
-              val adjustment = d1(currentTopic) + parameter.dist1(currentTopic) + t1(currentTopic)
-              val newTopic = multinomialDistSampler(gen, docTopicCounter, d, parameter.dist, t,
-                adjustment, currentTopic)
+              val adjustment = parameter.dist1(currentTopic) + t1(currentTopic)
+              val newTopic = metropolisHastingsSampler(gen, parameter.dist, t, adjustment,
+                docTopicCounter, termTopicCounter, totalTopicCounter,
+                beta, alpha, alphaAS, sumTerms, numTerms, currentTopic)
               assert(newTopic < numTopics)
               topics(i) = newTopic
               i += 1
@@ -429,85 +405,126 @@ object LDA {
   }
 
   /**
-   * A multinomial distribution sampler, using roulette method to sample an Int back.
+   * 这里组合使用 Gibbs sampler 和 Metropolis Hastings sampler
+   * 每次采样的复杂度为 log(K) K 为主题数(应该可以优化为 (2-6)* log(KD) KD 当前文档包含主题数)
+   * 1. 使用 Gibbs sampler 采样标准LDA公式中词相关部分:
+   * 论文LightLDA: Big Topic Models on Modest Compute Clusters 公式(6).
+   * 2. 把第一步采样得到的概率作为 Proposal q(·) 使用 Metropolis Hastings sampler 采样非对称先验公式
+   * 论文 Rethinking LDA: Why Priors Matter 公式(3) .
    */
-  @inline private def multinomialDistSampler[V](rand: Random, docTopicCounter: BSV[Count],
-    d: BDV[Double], w: BSV[Double], t: BDV[Double],
-    adjustment: Double, currentTopic: Int): Int = {
-    val numTopics = d.length
-    val lastSum = t(numTopics - 1) + w.data(w.used - 1) + d(numTopics - 1) + adjustment
+  def metropolisHastingsSampler(
+    rand: Random,
+    w: BSV[Double],
+    t: BDV[Double],
+    adjustment: Double,
+    docTopicCounter: VD,
+    termTopicCounter: VD,
+    totalTopicCounter: BDV[Count],
+    beta: Double,
+    alpha: Double,
+    alphaAS: Double,
+    numToken: Double,
+    numTerms: Double,
+    currentTopic: Int): Int = {
+    val newTopic = gibbsSamplerW(rand, w, t, adjustment, currentTopic)
+    val ctp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
+      beta, alpha, alphaAS, numToken, numTerms, currentTopic, true)
+    val ntp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
+      beta, alpha, alphaAS, numToken, numTerms, newTopic, false)
+    val cwp = termTopicProb(termTopicCounter, totalTopicCounter, currentTopic,
+      numTerms, beta, true)
+    val nwp = termTopicProb(termTopicCounter, totalTopicCounter, newTopic,
+      numTerms, beta, false)
+
+    val pi = (ntp * cwp) / (ctp * nwp)
+    if (rand.nextDouble() < 0.00001) {
+      println(s"pi: ${pi}")
+    }
+    if (rand.nextDouble() <= math.min(1.0, pi)) {
+      newTopic
+    } else {
+      currentTopic
+    }
+  }
+
+  @inline private def tokenTopicProb(
+    docTopicCounter: VD,
+    termTopicCounter: VD,
+    totalTopicCounter: BDV[Count],
+    beta: Double,
+    alpha: Double,
+    alphaR: Double,
+    numToken: Double,
+    numTerms: Double,
+    topic: Int,
+    isAdjustment: Boolean): Double = {
+    val numTopics = docTopicCounter.length
+    val adjustment = if (isAdjustment) -1 else 0
+    val ratio = (totalTopicCounter(topic) + adjustment + alphaR) / (numToken - 1 + alphaR * numTopics)
+    val asPrior = ratio * (alpha * numTopics)
+    // 这里移除了常数项 (docLen - 1 + alpha * numTopics)
+    (termTopicCounter(topic) + adjustment + beta) * (docTopicCounter(topic) + adjustment + asPrior) /
+      (totalTopicCounter(topic) + adjustment + (numTerms * beta))
+
+    // 原始公式论文 Rethinking LDA: Why Priors Matter 公式(3)
+    // val docLen = brzSum(docTopicCounter)
+    // (termTopicCounter(topic) + adjustment + beta) * (docTopicCounter(topic) + adjustment + asPrior) /
+    //   ((totalTopicCounter(topic) + adjustment + (numTerms * beta)) * (docLen - 1 + alpha * numTopics))
+  }
+
+  @inline private def termTopicProb(
+    termTopicCounter: VD,
+    totalTopicCounter: BDV[Count],
+    topic: Int,
+    numTerms: Double,
+    beta: Double,
+    isAdjustment: Boolean): Double = {
+    val termSum = beta * numTerms
+    val count = termTopicCounter(topic)
+    if (isAdjustment) {
+      count / (totalTopicCounter(topic) - 1 + termSum)
+    } else {
+      count / (totalTopicCounter(topic) + termSum)
+    }
+  }
+
+  @inline private def indexW(
+    w: BSV[Double],
+    t: BDV[Double],
+    adjustment: Double,
+    currentTopic: Int)(i: Int) = {
+    val lastWS = maxMinW(i, w)
+    val lastTS = maxMinT(i, t)
+    if (i >= currentTopic) {
+      lastWS + lastTS + adjustment
+    } else {
+      lastWS + lastTS
+    }
+  }
+
+  @inline private def gibbsSamplerW[V](
+    rand: Random,
+    w: BSV[Double],
+    t: BDV[Double],
+    adjustment: Double,
+    currentTopic: Int): Int = {
+    val numTopics = w.length
+    val lastSum = t(numTopics - 1) + w.data(w.used - 1) + adjustment
     val distSum = rand.nextDouble() * lastSum
     if (distSum >= lastSum) {
       return numTopics - 1
     }
-    val fun = index(docTopicCounter, d, w, t, adjustment, currentTopic) _
+    val fun = indexW(w, t, adjustment, currentTopic) _
     minMaxValueSearch(fun, distSum, numTopics)
-  }
-
-  @inline private def index(docTopicCounter: BSV[Count],
-    d: BDV[Double], w: BSV[Double], t: BDV[Double],
-    adjustment: Double, currentTopic: Int)(i: Int) = {
-    val lastDS = maxMinD(i, docTopicCounter, d)
-    val lastWS = maxMinW(i, w)
-    val lastTS = maxMinT(i, t)
-    if (i >= currentTopic) {
-      lastDS + lastWS + lastTS + adjustment
-    } else {
-      lastDS + lastWS + lastTS
-    }
-  }
-
-  @inline private def d(
-    denominator: BDV[Double],
-    denominator1: BDV[Double],
-    termTopicCounter: BSV[Count],
-    docTopicCounter: BSV[Count],
-    d: BDV[Double],
-    d1: BDV[Double],
-    sumTerms: Long,
-    numTopics: Int,
-    beta: Double,
-    alphaAS: Double): Unit = {
-    val used = docTopicCounter.used
-    val index = docTopicCounter.index
-    val data = docTopicCounter.data
-
-    val termSum = sumTerms - 1D + alphaAS * numTopics
-
-    var i = 0
-    var lastDsum = 0D
-
-    while (i < used) {
-      val topic = index(i)
-      val count = data(i)
-      val lastD = count * termSum * (termTopicCounter(topic) + beta) /
-        denominator(topic)
-
-      val lastD1 = count * termSum * (termTopicCounter(topic) - 1D + beta) /
-        denominator1(topic)
-
-      lastDsum += lastD
-      d(topic) = lastDsum
-      d1(topic) = lastD1 - lastD
-
-      i += 1
-    }
-    d(numTopics - 1) = lastDsum
   }
 
   @inline private def w(
     totalTopicCounter: BDV[Count],
-    denominator: BDV[Double],
-    denominator1: BDV[Double],
     termTopicCounter: VD,
-    sumTerms: Long,
-    numTopics: Int,
-    alpha: Double,
-    beta: Double,
-    alphaAS: Double): Parameter = {
-    val alphaSum = alpha * numTopics
-    val termSum = sumTerms - 1D + alphaAS * numTopics
-    val length = termTopicCounter.length
+    numTerms: Int,
+    beta: Double): Parameter = {
+    val numTopics = termTopicCounter.length
+    val tremSum = beta * numTerms
     val used = termTopicCounter.used
     val index = termTopicCounter.index
     val data = termTopicCounter.data
@@ -520,68 +537,35 @@ object LDA {
     while (i < used) {
       val topic = index(i)
       val count = data(i)
-      val lastW = count * alphaSum * (totalTopicCounter(topic) + alphaAS) /
-        denominator(topic)
-
-      val lastW1 = count * (alphaSum * (totalTopicCounter(topic) - 1D + alphaAS) - termSum) /
-        denominator1(topic)
-
+      val lastW = count / (totalTopicCounter(topic) + tremSum)
+      val lastW1 = (count - 1D) / (totalTopicCounter(topic) - 1D + tremSum)
       lastWsum += lastW
       w(i) = lastWsum
       w1(i) = lastW1 - lastW
       i += 1
     }
-    Parameter(termTopicCounter, new BSV[Double](index, w, used, length),
-      new BSV[Double](index, w1, used, length))
+    Parameter(termTopicCounter, new BSV[Double](index, w, used, numTopics),
+      new BSV[Double](index, w1, used, numTopics))
   }
 
   private def t(
     totalTopicCounter: BDV[Count],
-    denominator: BDV[Double],
-    denominator1: BDV[Double],
-    sumTerms: Long,
-    numTopics: Int,
-    alpha: Double,
-    beta: Double,
-    alphaAS: Double): (BDV[Double], BDV[Double]) = {
+    numTerm: Int,
+    beta: Double): (BDV[Double], BDV[Double]) = {
+    val numTopics = totalTopicCounter.length
     val t = BDV.zeros[Double](numTopics)
     val t1 = BDV.zeros[Double](numTopics)
-
-    val alphaSum = alpha * numTopics
-    val termSum = sumTerms - 1D + alphaAS * numTopics
+    val termSum = beta * numTerm
 
     var lastTsum = 0D
     for (topic <- 0 until numTopics) {
-      val lastT = beta * alphaSum * (totalTopicCounter(topic) + alphaAS) /
-        denominator(topic)
-
-      val lastT1 = (-1D + beta) * (alphaSum * (totalTopicCounter(topic) +
-        (-1D + alphaAS)) - termSum) / denominator1(topic)
-
+      val lastT = beta / (totalTopicCounter(topic) + termSum)
+      val lastT1 = beta / (totalTopicCounter(topic) - 1.0 + termSum)
       lastTsum += lastT
       t(topic) = lastTsum
       t1(topic) = lastT1 - lastT
     }
     (t, t1)
-  }
-
-  private def denominatorBDV(
-    totalTopicCounter: BDV[Count],
-    sumTerms: Long,
-    numTerms: Int,
-    numTopics: Int,
-    alpha: Double,
-    beta: Double,
-    alphaAS: Double): (BDV[Double], BDV[Double]) = {
-    val termSum = sumTerms - 1D + alphaAS * numTopics
-    val betaSum = numTerms * beta
-    val denominator = BDV.zeros[Double](numTopics)
-    val denominator1 = BDV.zeros[Double](numTopics)
-    for (topic <- 0 until numTopics) {
-      denominator(topic) = (totalTopicCounter(topic) + betaSum) * termSum
-      denominator1(topic) = (totalTopicCounter(topic) - 1D + betaSum) * termSum
-    }
-    (denominator, denominator1)
   }
 }
 

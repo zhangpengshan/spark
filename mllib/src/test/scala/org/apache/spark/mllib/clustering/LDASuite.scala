@@ -45,8 +45,8 @@ class LDASuite extends FunSuite with MLlibTestSparkContext {
       i += 1
     }
 
-    // println((System.currentTimeMillis() - startedAt) / 1e3)
-    // pps.foreach(println)
+    println((System.currentTimeMillis() - startedAt) / 1e3)
+    pps.foreach(println)
 
     val ppsDiff = pps.init.zip(pps.tail).map { case (lhs, rhs) => lhs - rhs}
     assert(ppsDiff.count(_ > 0).toDouble / ppsDiff.size > 0.6)
