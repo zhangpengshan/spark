@@ -378,28 +378,35 @@ object LDA {
     corpus
   }
 
-  private def initializeEdges(gen: Random, doc: BSV[Int], docId: DocId, numTopics: Int,
+  private def initializeEdges(
+    gen: Random,
+    doc: BSV[Int],
+    docId: DocId,
+    numTopics: Int,
     computedModel: LDAModel = null): Array[Edge[ED]] = {
     assert(docId >= 0)
     val newDocId: DocId = -(docId + 1L)
     if (computedModel == null) {
       doc.activeIterator.map { case (term, counter) =>
-        val topic = (0 until counter).map { i =>
+        val ev = (0 until counter).map { i =>
           uniformDistSampler(gen, numTopics)
         }.toArray
-        Edge(term, newDocId, topic)
+        Edge(term, newDocId, ev)
       }.toArray
     }
     else {
-      var docTopicCounter = computedModel.uniformDistSampler(doc, gen)
-      (0 to 10).foreach(t => {
-        docTopicCounter = computedModel.generateTopicDistForDocument(docTopicCounter, doc, gen)
-      })
+      val tokens = computedModel.vec2Array(doc)
+      val topics = new Array[Int](tokens.length)
+      var docTopicCounter = computedModel.uniformDistSampler(tokens, topics, gen)
+      for (t <- 0 until 15) {
+        docTopicCounter = computedModel.generateTopicDistForDocument(docTopicCounter,
+          tokens, topics, gen)
+      }
       doc.activeIterator.map { case (term, counter) =>
-        val topic = (0 until counter).map { i =>
-          computedModel.termMultinomialDistSampler(docTopicCounter, term, gen)
-        }.toArray
-        Edge(term, newDocId, topic)
+        val ev = topics.zipWithIndex.filter { case (topic, offset) =>
+          term == tokens(offset)
+        }.map(_._1)
+        Edge(term, newDocId, ev)
       }.toArray
     }
   }
@@ -426,7 +433,7 @@ object LDA {
     numToken: Double,
     numTerms: Double,
     currentTopic: Int): Int = {
-    val newTopic = gibbsSamplerW(rand, w, t, adjustment, currentTopic)
+    val newTopic = gibbsSamplerWord(rand, w, t, adjustment, currentTopic)
     val ctp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
       beta, alpha, alphaAS, numToken, numTerms, currentTopic, true)
     val ntp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
@@ -435,12 +442,13 @@ object LDA {
       numTerms, beta, true)
     val nwp = termTopicProb(termTopicCounter, totalTopicCounter, newTopic,
       numTerms, beta, false)
-
     val pi = (ntp * cwp) / (ctp * nwp)
+
     if (rand.nextDouble() < 0.00001) {
-      println(s"pi: ${pi}")
+      println(s"Pi: ${pi}")
     }
-    if (rand.nextDouble() <= math.min(1.0, pi)) {
+
+    if (rand.nextDouble() < math.min(1.0, pi)) {
       newTopic
     } else {
       currentTopic
@@ -482,13 +490,13 @@ object LDA {
     val termSum = beta * numTerms
     val count = termTopicCounter(topic)
     if (isAdjustment) {
-      count / (totalTopicCounter(topic) - 1 + termSum)
+      (count - 1D + beta) / (totalTopicCounter(topic) - 1D + termSum)
     } else {
-      count / (totalTopicCounter(topic) + termSum)
+      (count + beta) / (totalTopicCounter(topic) + termSum)
     }
   }
 
-  @inline private def indexW(
+  @inline private def indexWord(
     w: BSV[Double],
     t: BDV[Double],
     adjustment: Double,
@@ -502,7 +510,7 @@ object LDA {
     }
   }
 
-  @inline private def gibbsSamplerW[V](
+  @inline private def gibbsSamplerWord[V](
     rand: Random,
     w: BSV[Double],
     t: BDV[Double],
@@ -514,7 +522,7 @@ object LDA {
     if (distSum >= lastSum) {
       return numTopics - 1
     }
-    val fun = indexW(w, t, adjustment, currentTopic) _
+    val fun = indexWord(w, t, adjustment, currentTopic) _
     minMaxValueSearch(fun, distSum, numTopics)
   }
 
@@ -524,7 +532,7 @@ object LDA {
     numTerms: Int,
     beta: Double): Parameter = {
     val numTopics = termTopicCounter.length
-    val tremSum = beta * numTerms
+    val termSum = beta * numTerms
     val used = termTopicCounter.used
     val index = termTopicCounter.index
     val data = termTopicCounter.data
@@ -537,8 +545,8 @@ object LDA {
     while (i < used) {
       val topic = index(i)
       val count = data(i)
-      val lastW = count / (totalTopicCounter(topic) + tremSum)
-      val lastW1 = (count - 1D) / (totalTopicCounter(topic) - 1D + tremSum)
+      val lastW = count / (totalTopicCounter(topic) + termSum)
+      val lastW1 = (count - 1D) / (totalTopicCounter(topic) - 1D + termSum)
       lastWsum += lastW
       w(i) = lastWsum
       w1(i) = lastW1 - lastW
