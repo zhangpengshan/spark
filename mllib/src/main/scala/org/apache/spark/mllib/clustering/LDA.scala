@@ -58,6 +58,7 @@ class LDA private[mllib](
       numTopics, docs.first()._2.size, alpha, beta, alphaAS, storageLevel)
   }
 
+  // scalastyle:off
   /**
    * 语料库文档数
    */
@@ -67,6 +68,7 @@ class LDA private[mllib](
    * 语料库总的词数(包含重复)
    */
   private val sumToken = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
+  // scalastyle:on
 
   @transient private val sc = corpus.vertices.context
   @transient private val seed = new Random().nextInt()
@@ -181,6 +183,15 @@ class LDA private[mllib](
     minMap
   }
 
+
+  /**
+   * 词在所有主题分布和该词所在文本的主题分布乘积: p(w)=\sum_{k}{p(k|d)*p(w|k)}=
+   * \sum_{k}{\frac{{n}_{kw}+{\beta }_{w}} {{n}_{k}+\bar{\beta }} \frac{{n}_{kd}+{\alpha }_{k}} {\sum{{n}_{k}}+\bar{\alpha }}}=
+   *  \sum_{k} \frac{{\alpha }_{k}{\beta }_{w}  + {n}_{kw}{\alpha }_{k} + {n}_{kd}{\beta }_{w} + {n}_{kw}{n}_{kd}}{{n}_{k}+\bar{\beta }} \frac{1}{\sum{{n}_{k}}+\bar{\alpha }}}
+   * \exp^{-(\sum{\log(p(w))})/N}
+   * N为语料库包含的token数
+   * @return
+   */
   def perplexity(): Double = {
     val totalTopicCounter = this.globalParameter.totalTopicCounter
     val numTopics = this.numTopics
@@ -190,6 +201,7 @@ class LDA private[mllib](
     val totalSize = brzSum(totalTopicCounter)
     var totalProb = 0D
 
+    // \frac{{\alpha }_{k}{\beta }_{w}}{{n}_{k}+\bar{\beta }}
     totalTopicCounter.activeIterator.foreach { case (topic, cn) =>
       totalProb += alpha * beta / (cn + numTerms * beta)
     }
@@ -198,12 +210,14 @@ class LDA private[mllib](
       val probDist = BSV.zeros[Double](numTopics)
       if (vid >= 0) {
         val termTopicCounter = counter
+        // \frac{{n}_{kw}{\alpha }_{k}}{{n}_{k}+\bar{\beta }}
         termTopicCounter.activeIterator.foreach { case (topic, cn) =>
           probDist(topic) = cn * alpha /
             (totalTopicCounter(topic) + numTerms * beta)
         }
       } else {
         val docTopicCounter = counter
+        // \frac{{n}_{kd}{\beta }_{w}}{{n}_{k}+\bar{\beta }}
         docTopicCounter.activeIterator.foreach { case (topic, cn) =>
           probDist(topic) = cn * beta /
             (totalTopicCounter(topic) + numTerms * beta)
@@ -219,6 +233,7 @@ class LDA private[mllib](
 
       var prob = 0D
 
+      // \frac{{n}_{kw}{n}_{kd}}{{n}_{k}+\bar{\beta}}
       docTopicCounter.activeIterator.foreach { case (topic, cn) =>
         prob += cn * termTopicCounter(topic) /
           (totalTopicCounter(topic) + numTerms * beta)
@@ -411,13 +426,24 @@ object LDA {
     }
   }
 
+  // scalastyle:off
   /**
    * 这里组合使用 Gibbs sampler 和 Metropolis Hastings sampler
    * 每次采样的复杂度为 log(K) K 为主题数(应该可以优化为 (2-6)* log(KD) KD 当前文档包含主题数)
    * 1. 使用 Gibbs sampler 采样标准LDA公式中词相关部分:
-   * 论文LightLDA: Big Topic Models on Modest Compute Clusters 公式(6).
+   * 论文LightLDA: Big Topic Models on Modest Compute Clusters 公式(6):
+   * ( \frac{{n}_{kd}+{\beta }_{w}}{{n}_{k}+\bar{\beta }} )
    * 2. 把第一步采样得到的概率作为 Proposal q(·) 使用 Metropolis Hastings sampler 采样非对称先验公式
-   * 论文 Rethinking LDA: Why Priors Matter 公式(3) .
+   * 论文 Rethinking LDA: Why Priors Matter 公式(3)
+   * \frac{{n}_{kw}^{-di}+{\beta }_{w}}{{n}_{k}+\bar{\beta}} \frac{{n}_{kd} + \bar{\alpha} \frac{{n}_{k} + \acute{\alpha}}{\sum{n}_{k} +\bar{\acute{\alpha}}}}{\sum{n}_{kd} +\bar{\alpha}}
+   *
+   * 其中
+   * \bar{\beta}=\sum_{w}{\beta}_{w}
+   * \bar{\alpha}=\sum_{k}{\alpha}_{k}
+   * \bar{\acute{\alpha}}=\bar{\acute{\alpha}}=\sum_{k}\acute{\alpha}
+   * {n}_{kd} 是文档d中主题为k的tokens数
+   * {n}_{kw} 词中主题为k的tokens数
+   * {n}_{k} 是语料库中主题为k的tokens数
    */
   def metropolisHastingsSampler(
     rand: Random,
@@ -438,9 +464,9 @@ object LDA {
       beta, alpha, alphaAS, numToken, numTerms, currentTopic, true)
     val ntp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
       beta, alpha, alphaAS, numToken, numTerms, newTopic, false)
-    val cwp = termTopicProb(termTopicCounter, totalTopicCounter, currentTopic,
+    val cwp = wordTopicProb(termTopicCounter, totalTopicCounter, currentTopic,
       numTerms, beta, true)
-    val nwp = termTopicProb(termTopicCounter, totalTopicCounter, newTopic,
+    val nwp = wordTopicProb(termTopicCounter, totalTopicCounter, newTopic,
       numTerms, beta, false)
     val pi = (ntp * cwp) / (ctp * nwp)
 
@@ -455,6 +481,9 @@ object LDA {
     }
   }
 
+  // scalastyle:on
+
+  // scalastyle:off
   @inline private def tokenTopicProb(
     docTopicCounter: VD,
     termTopicCounter: VD,
@@ -468,10 +497,12 @@ object LDA {
     isAdjustment: Boolean): Double = {
     val numTopics = docTopicCounter.length
     val adjustment = if (isAdjustment) -1 else 0
-    val ratio = (totalTopicCounter(topic) + adjustment + alphaR) / (numToken - 1 + alphaR * numTopics)
+    val ratio = (totalTopicCounter(topic) + adjustment + alphaR) /
+      (numToken - 1 + alphaR * numTopics)
     val asPrior = ratio * (alpha * numTopics)
     // 这里移除了常数项 (docLen - 1 + alpha * numTopics)
-    (termTopicCounter(topic) + adjustment + beta) * (docTopicCounter(topic) + adjustment + asPrior) /
+    (termTopicCounter(topic) + adjustment + beta) *
+      (docTopicCounter(topic) + adjustment + asPrior) /
       (totalTopicCounter(topic) + adjustment + (numTerms * beta))
 
     // 原始公式论文 Rethinking LDA: Why Priors Matter 公式(3)
@@ -480,7 +511,8 @@ object LDA {
     //   ((totalTopicCounter(topic) + adjustment + (numTerms * beta)) * (docLen - 1 + alpha * numTopics))
   }
 
-  @inline private def termTopicProb(
+  // scalastyle:on
+  @inline private def wordTopicProb(
     termTopicCounter: VD,
     totalTopicCounter: BDV[Count],
     topic: Int,
@@ -510,6 +542,9 @@ object LDA {
     }
   }
 
+  /**
+   * \frac{{n}_{kw}+{\beta}_{w}}{{n}_{k}+\bar{\beta}}
+   */
   @inline private def gibbsSamplerWord[V](
     rand: Random,
     w: BSV[Double],
@@ -526,6 +561,9 @@ object LDA {
     minMaxValueSearch(fun, distSum, numTopics)
   }
 
+  /**
+   * \frac{{n}_{kw}}{{n}_{k}+\bar{\beta}}
+   */
   @inline private def w(
     totalTopicCounter: BDV[Count],
     termTopicCounter: VD,
@@ -556,6 +594,9 @@ object LDA {
       new BSV[Double](index, w1, used, numTopics))
   }
 
+  /**
+   * \frac{{\beta}_{w}}{{n}_{k}+\bar{\beta}}
+   */
   private def t(
     totalTopicCounter: BDV[Count],
     numTerm: Int,

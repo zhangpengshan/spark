@@ -104,9 +104,6 @@ class LDAModel private[mllib](
     docTopicCounter
   }
 
-  /**
-   * A multinomial distribution sampler, using roulette method to sample an Int back.
-   */
   @inline private def gibbsSamplerWord(
     rand: Random,
     t: BDV[Double],
@@ -124,6 +121,7 @@ class LDAModel private[mllib](
     lastWS + lastTS
   }
 
+  // scalastyle:off
   def metropolisHastingsSampler(
     rand: Random,
     w: BSV[Double],
@@ -156,6 +154,7 @@ class LDAModel private[mllib](
       currentTopic
     }
   }
+  // scalastyle:on
 
   @inline private def tokenTopicProb(
     docTopicCounter: BSV[Double],
