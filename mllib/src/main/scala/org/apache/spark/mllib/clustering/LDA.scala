@@ -19,8 +19,8 @@ package org.apache.spark.mllib.clustering
 
 import java.util.Random
 
-
 import scala.collection.mutable
+import scala.reflect.ClassTag
 
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, sum => brzSum}
 
@@ -98,7 +98,7 @@ class LDA private[mllib](
 
   private def gibbsSampling(): Unit = {
     val broadcast = sc.broadcast(globalParameter)
-    val sampleCorpus = sampleToken(corpus, broadcast,
+    val sampleCorpus = sampleTokens(corpus, broadcast,
       innerIter + seed, sumToken, numTopics, numTerms, alpha, beta, alphaAS)
     sampleCorpus.persist(storageLevel)
 
@@ -184,14 +184,15 @@ class LDA private[mllib](
   }
 
 
+  // scalastyle:off
   /**
    * 词在所有主题分布和该词所在文本的主题分布乘积: p(w)=\sum_{k}{p(k|d)*p(w|k)}=
    * \sum_{k}{\frac{{n}_{kw}+{\beta }_{w}} {{n}_{k}+\bar{\beta }} \frac{{n}_{kd}+{\alpha }_{k}} {\sum{{n}_{k}}+\bar{\alpha }}}=
-   *  \sum_{k} \frac{{\alpha }_{k}{\beta }_{w}  + {n}_{kw}{\alpha }_{k} + {n}_{kd}{\beta }_{w} + {n}_{kw}{n}_{kd}}{{n}_{k}+\bar{\beta }} \frac{1}{\sum{{n}_{k}}+\bar{\alpha }}}
+   * \sum_{k} \frac{{\alpha }_{k}{\beta }_{w}  + {n}_{kw}{\alpha }_{k} + {n}_{kd}{\beta }_{w} + {n}_{kw}{n}_{kd}}{{n}_{k}+\bar{\beta }} \frac{1}{\sum{{n}_{k}}+\bar{\alpha }}}
    * \exp^{-(\sum{\log(p(w))})/N}
    * N为语料库包含的token数
-   * @return
    */
+  // scalastyle:on
   def perplexity(): Double = {
     val totalTopicCounter = this.globalParameter.totalTopicCounter
     val numTopics = this.numTopics
@@ -298,7 +299,7 @@ object LDA {
     topicModeling.saveModel(burnIn)
   }
 
-  private[mllib] def sampleToken(
+  private[mllib] def sampleTokens(
     graph: Graph[VD, ED],
     broadcast: Broadcast[GlobalParameter],
     innerIter: Long,
@@ -311,26 +312,41 @@ object LDA {
     val parts = graph.edges.partitions.size
     graph.mapTriplets(
       (pid, iter) => {
-        val gen = new XORShiftRandom(parts * innerIter + pid)
-        val wMap = mutable.Map[VertexId, Parameter]()
+        val rand = new XORShiftRandom(parts * innerIter + pid)
+        val wMap = mutable.Map[VertexId, (BSV[Double], BSV[Double])]()
+        val dMap = mutable.Map[VertexId, BSV[Double]]()
         val GlobalParameter(totalTopicCounter, t, t1) = broadcast.value
         iter.map {
           triplet =>
-            val term = triplet.srcId
+            val termId = triplet.srcId
+            val docId = triplet.dstId
             val termTopicCounter = triplet.srcAttr
             val docTopicCounter = triplet.dstAttr
             val topics = triplet.attr
-            val parameter = wMap.getOrElseUpdate(term, w(totalTopicCounter,
-              termTopicCounter, numTerms, beta))
             var i = 0
             while (i < topics.length) {
               val currentTopic = topics(i)
-              val adjustment = parameter.dist1(currentTopic) + t1(currentTopic)
-              val newTopic = metropolisHastingsSampler(gen, parameter.dist, t, adjustment,
-                docTopicCounter, termTopicCounter, totalTopicCounter,
-                beta, alpha, alphaAS, sumTerms, numTerms, currentTopic)
+              val newTopic = if (rand.nextDouble() < 0.5) {
+                val p = wMap.getOrElseUpdate(termId, this.w(totalTopicCounter, t,
+                  termTopicCounter, numTerms, beta))
+                val w = p._1
+                val w1 = p._2
+                val proposalTopic = gibbsSamplerWord(rand, w, t, w1, t1, currentTopic)
+                metropolisHastingsSampler(rand, docTopicCounter, termTopicCounter,
+                  totalTopicCounter, beta, alpha, alphaAS, sumTerms, numTerms,
+                  currentTopic, proposalTopic, false)
+              } else {
+                val d = dMap.getOrElseUpdate(docId, this.d(docTopicCounter, alpha))
+                val proposalTopic = gibbsSamplerDoc(rand, d, alpha, currentTopic)
+                metropolisHastingsSampler(rand, docTopicCounter, termTopicCounter,
+                  totalTopicCounter, beta, alpha, alphaAS, sumTerms, numTerms,
+                  currentTopic, proposalTopic, true)
+              }
+
               assert(newTopic < numTopics)
-              topics(i) = newTopic
+              if (newTopic != currentTopic) {
+                topics(i) = newTopic
+              }
               i += 1
             }
             topics
@@ -447,31 +463,40 @@ object LDA {
    */
   def metropolisHastingsSampler(
     rand: Random,
-    w: BSV[Double],
-    t: BDV[Double],
-    adjustment: Double,
     docTopicCounter: VD,
     termTopicCounter: VD,
     totalTopicCounter: BDV[Count],
     beta: Double,
     alpha: Double,
     alphaAS: Double,
-    numToken: Double,
+    numTokens: Double,
     numTerms: Double,
-    currentTopic: Int): Int = {
-    val newTopic = gibbsSamplerWord(rand, w, t, adjustment, currentTopic)
+    currentTopic: Int,
+    newTopic: Int,
+    docProposal: Boolean): Int = {
+    if (newTopic == currentTopic) return newTopic
+
     val ctp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
-      beta, alpha, alphaAS, numToken, numTerms, currentTopic, true)
+      beta, alpha, alphaAS, numTokens, numTerms, currentTopic, true)
     val ntp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
-      beta, alpha, alphaAS, numToken, numTerms, newTopic, false)
-    val cwp = wordTopicProb(termTopicCounter, totalTopicCounter, currentTopic,
-      numTerms, beta, true)
-    val nwp = wordTopicProb(termTopicCounter, totalTopicCounter, newTopic,
-      numTerms, beta, false)
+      beta, alpha, alphaAS, numTokens, numTerms, newTopic, false)
+    val cwp = if (docProposal) {
+      docTopicProb(docTopicCounter, currentTopic, alpha, true)
+    } else {
+      wordTopicProb(termTopicCounter, totalTopicCounter, currentTopic,
+        numTerms, beta, true)
+    }
+    val nwp = if (docProposal) {
+      docTopicProb(docTopicCounter, newTopic, alpha, false)
+    } else {
+      wordTopicProb(termTopicCounter, totalTopicCounter, newTopic,
+        numTerms, beta, false)
+    }
     val pi = (ntp * cwp) / (ctp * nwp)
 
     if (rand.nextDouble() < 0.00001) {
-      println(s"Pi: ${pi}")
+      println(s"Pi: $docProposal ${pi}")
+      println(s"($ntp * $cwp) / ($ctp * $nwp) ")
     }
 
     if (rand.nextDouble() < math.min(1.0, pi)) {
@@ -480,7 +505,6 @@ object LDA {
       currentTopic
     }
   }
-
   // scalastyle:on
 
   // scalastyle:off
@@ -491,14 +515,14 @@ object LDA {
     beta: Double,
     alpha: Double,
     alphaR: Double,
-    numToken: Double,
+    numTokens: Double,
     numTerms: Double,
     topic: Int,
     isAdjustment: Boolean): Double = {
     val numTopics = docTopicCounter.length
     val adjustment = if (isAdjustment) -1 else 0
     val ratio = (totalTopicCounter(topic) + adjustment + alphaR) /
-      (numToken - 1 + alphaR * numTopics)
+      (numTokens - 1 + alphaR * numTopics)
     val asPrior = ratio * (alpha * numTopics)
     // 这里移除了常数项 (docLen - 1 + alpha * numTopics)
     (termTopicCounter(topic) + adjustment + beta) *
@@ -512,6 +536,7 @@ object LDA {
   }
 
   // scalastyle:on
+
   @inline private def wordTopicProb(
     termTopicCounter: VD,
     totalTopicCounter: BDV[Count],
@@ -528,37 +553,49 @@ object LDA {
     }
   }
 
-  @inline private def indexWord(
-    w: BSV[Double],
-    t: BDV[Double],
-    adjustment: Double,
-    currentTopic: Int)(i: Int) = {
-    val lastWS = maxMinW(i, w)
-    val lastTS = maxMinT(i, t)
-    if (i >= currentTopic) {
-      lastWS + lastTS + adjustment
+  @inline private def docTopicProb(
+    docTopicCounter: VD,
+    topic: Int,
+    alpha: Double,
+    isAdjustment: Boolean): Double = {
+    if (isAdjustment) {
+      docTopicCounter(topic) + alpha - 1
     } else {
-      lastWS + lastTS
+      docTopicCounter(topic) + alpha
     }
+  }
+
+  @inline private def indexW(
+    w: BSV[Double],
+    distSum: Double,
+    adjustment: Double,
+    currentTopic: Int): Int = {
+    val fun = (i: Int) => if (w.index(i) >= currentTopic) w.data(i) + adjustment else w.data(i)
+    val pos = binarySearchInterval(fun, distSum, 0, w.used, true)
+    pos
   }
 
   /**
    * \frac{{n}_{kw}+{\beta}_{w}}{{n}_{k}+\bar{\beta}}
    */
-  @inline private def gibbsSamplerWord[V](
+  @inline private def gibbsSamplerWord(
     rand: Random,
     w: BSV[Double],
     t: BDV[Double],
-    adjustment: Double,
+    w1: BSV[Double],
+    t1: BDV[Double],
     currentTopic: Int): Int = {
     val numTopics = w.length
-    val lastSum = t(numTopics - 1) + w.data(w.used - 1) + adjustment
+    val adjustment = w1(currentTopic) + t1(currentTopic)
+    val lastSum = w.data(w.used - 1) + t(numTopics - 1) + adjustment
     val distSum = rand.nextDouble() * lastSum
-    if (distSum >= lastSum) {
-      return numTopics - 1
+    val fun = (topic: Int) => {
+      val lastWS = LDAUtils.binarySearchSparseVector(topic, w)
+      val lastTS = t(topic)
+      if (topic >= currentTopic) lastWS + lastTS + adjustment else lastWS + lastTS
     }
-    val fun = indexWord(w, t, adjustment, currentTopic) _
-    minMaxValueSearch(fun, distSum, numTopics)
+    val topic = binarySearchInterval(fun, distSum, 0, numTopics, true)
+    math.min(topic, numTopics - 1)
   }
 
   /**
@@ -566,9 +603,10 @@ object LDA {
    */
   @inline private def w(
     totalTopicCounter: BDV[Count],
+    t: BDV[Double],
     termTopicCounter: VD,
     numTerms: Int,
-    beta: Double): Parameter = {
+    beta: Double): (BSV[Double], BSV[Double]) = {
     val numTopics = termTopicCounter.length
     val termSum = beta * numTerms
     val used = termTopicCounter.used
@@ -577,7 +615,7 @@ object LDA {
     val w = new Array[Double](used)
     val w1 = new Array[Double](used)
 
-    var lastWsum = 0D
+    var lastSum = 0D
     var i = 0
 
     while (i < used) {
@@ -585,13 +623,53 @@ object LDA {
       val count = data(i)
       val lastW = count / (totalTopicCounter(topic) + termSum)
       val lastW1 = (count - 1D) / (totalTopicCounter(topic) - 1D + termSum)
-      lastWsum += lastW
-      w(i) = lastWsum
+      lastSum += lastW
+      w(i) = lastSum // + t(topic)
       w1(i) = lastW1 - lastW
       i += 1
     }
-    Parameter(termTopicCounter, new BSV[Double](index, w, used, numTopics),
+    (new BSV[Double](index, w, used, numTopics),
       new BSV[Double](index, w1, used, numTopics))
+  }
+
+  @inline private def gibbsSamplerDoc(
+    rand: Random,
+    d: BSV[Double],
+    alpha: Double,
+    currentTopic: Int): Int = {
+    val numTopics = d.length
+    val adjustment = -1D
+    val lastSum = d.data(d.used - 1) + alpha * numTopics
+    val distSum = rand.nextDouble() * lastSum
+    val fun = (topic: Int) => {
+      val lastSum = LDAUtils.binarySearchSparseVector(topic, d)
+      val tSum = alpha * (topic + 1)
+      if (topic >= currentTopic) lastSum + tSum + adjustment else lastSum + tSum
+    }
+    val topic = binarySearchInterval(fun, distSum, 0, numTopics, true)
+    math.min(topic, numTopics - 1)
+  }
+
+  @inline private def d(
+    docTopicCounter: VD,
+    alpha: Double): BSV[Double] = {
+    val numTopics = docTopicCounter.length
+    val used = docTopicCounter.used
+    val index = docTopicCounter.index
+    val data = docTopicCounter.data
+    val d = new Array[Double](used)
+
+    var lastSum = 0D
+    var i = 0
+
+    while (i < used) {
+      val topic = index(i)
+      val lastW = data(i) // + (topic + 1) * alpha
+      lastSum += lastW
+      d(i) = lastSum
+      i += 1
+    }
+    new BSV[Double](index, d, used, numTopics)
   }
 
   /**
@@ -621,113 +699,73 @@ object LDA {
 object LDAUtils {
 
   /**
-   * A uniform distribution sampler, which is only used for initialization.
+   * A uniform distribution sampler
    */
   @inline private[mllib] def uniformDistSampler(rand: Random, dimension: Int): Int = {
     rand.nextInt(dimension)
   }
 
-  @inline private[mllib] def minMaxIndexSearch[V](v: BSV[V], i: Int,
-    lastReturnedPos: Int): Int = {
-    val array = v.array
-    val index = array.index
-    if (array.activeSize == 0) return -1
-    if (index(0) > i) return -1
-    if (lastReturnedPos >= array.activeSize - 1) return array.activeSize - 1
-    var begin = lastReturnedPos
-    var end = array.activeSize - 1
-    var found = false
-    if (end > i) end = i
-    if (begin < 0) begin = 0
-
-    var mid = (end + begin) >> 1
-
-    while (!found && begin <= end) {
-      if (index(mid) < i) {
-        begin = mid + 1
-        mid = (end + begin) >> 1
-      }
-      else if (index(mid) > i) {
-        end = mid - 1
-        mid = (end + begin) >> 1
-      }
-      else {
-        found = true
-      }
-    }
-
-    val minMax = if (found || index(mid) < i || mid == 0) {
-      mid
-    }
-    else {
-      mid - 1
-    }
-    assert(index(minMax) <= i)
-    if (minMax < array.activeSize - 1) assert(index(minMax + 1) > i)
-    minMax
+  def binarySearchArray[K](
+    index: Array[K],
+    key: K,
+    begin: Int,
+    end: Int,
+    greater: Boolean)(implicit ord: Ordering[K], ctag: ClassTag[K]): Int = {
+    binarySearchInterval(i => index(i), key, begin, end, greater)
   }
 
-  @inline private[mllib] def minMaxValueSearch(index: (Int) => Double, distSum: Double,
-    numTopics: Int): Int = {
-    var begin = 0
-    var end = numTopics - 1
-    var found = false
-    var mid = (end + begin) >> 1
-    var sum = 0D
-    var isLeft = false
-    while (!found && begin <= end) {
-      sum = index(mid)
-      if (sum < distSum) {
-        isLeft = false
-        begin = mid + 1
-        mid = (end + begin) >> 1
+  def binarySearchInterval[K](
+    index: Int => K,
+    key: K,
+    begin: Int,
+    end: Int,
+    greater: Boolean)(implicit ord: Ordering[K], ctag: ClassTag[K]): Int = {
+    if (begin == end) {
+      return if (greater) end else begin - 1
+    }
+    var b = begin
+    var e = end - 1
+
+    var mid: Int = (e + b) >> 1
+    while (b <= e) {
+      mid = (e + b) >> 1
+      if (ord.lt(index(mid), key)) {
+        b = mid + 1
       }
-      else if (sum > distSum) {
-        isLeft = true
-        end = mid - 1
-        mid = (end + begin) >> 1
+      else if (ord.gt(index(mid), key)) {
+        e = mid - 1
       }
       else {
-        found = true
+        return mid
       }
     }
-
-    val topic = if (found) {
+    mid = if ((greater && ord.gteq(index(mid), key)) || (!greater && ord.lteq(index(mid), key))) {
       mid
     }
-    else if (sum < distSum || isLeft) {
+    else if (greater) {
       mid + 1
-    } else {
+    }
+    else {
       mid - 1
     }
-
-    assert(index(topic) >= distSum)
-    if (topic > 0) assert(index(topic - 1) <= distSum)
-    topic
+    if (greater) {
+      if (mid < end) assert(ord.gteq(index(mid), key))
+      if (mid > 0) assert(ord.lteq(index(mid - 1), key))
+    } else {
+      if (mid > 0) assert(ord.lteq(index(mid), key))
+      if (mid < end - 1) assert(ord.gteq(index(mid + 1), key))
+    }
+    mid
   }
 
-  @inline private[mllib] def maxMinD[V](i: Int, docTopicCounter: BSV[V], d: BDV[Double]) = {
-    val lastReturnedPos = minMaxIndexSearch(docTopicCounter, i, -1)
-    if (lastReturnedPos > -1) {
-      d(docTopicCounter.index(lastReturnedPos))
+  @inline private[mllib] def binarySearchSparseVector(index: Int, w: BSV[Double]) = {
+    val pos = binarySearchArray(w.index, index, 0, w.used, false)
+    if (pos > -1) {
+      w.data(pos)
     }
     else {
       0D
     }
-  }
-
-  @inline private[mllib] def maxMinW(i: Int, w: BSV[Double]) = {
-    val lastReturnedPos = minMaxIndexSearch(w, i, -1)
-    if (lastReturnedPos > -1) {
-      w.data(lastReturnedPos)
-    }
-    else {
-      0D
-    }
-  }
-
-  @inline private[mllib] def maxMinT(i: Int, t: BDV[Double]) = {
-    t(i)
   }
 }
 

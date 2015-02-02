@@ -19,7 +19,9 @@ package org.apache.spark.mllib.clustering
 
 import java.util.Random
 
-import breeze.linalg.{Vector => BV, DenseVector => BDV, SparseVector => BSV, sum => brzSum, norm => brzNorm}
+import breeze.linalg.{Vector => BV, DenseVector => BDV, SparseVector => BSV,
+sum => brzSum, norm => brzNorm}
+
 import org.apache.spark.mllib.linalg.{Vectors, DenseVector => SDV, SparseVector => SSV}
 
 class LDAModel private[mllib](
@@ -34,7 +36,7 @@ class LDAModel private[mllib](
   }
 
   val (numTopics, numTerms) = (gtc.size, ttc.size)
-  lazy val numToken = brzSum(gtc)
+  lazy val numTokens = brzSum(gtc)
 
   def globalTopicCounter = Vectors.fromBreeze(gtc)
 
@@ -78,15 +80,21 @@ class LDAModel private[mllib](
     topics: Array[Int],
     rand: Random): BSV[Double] = {
     val newDocTopicCounter = BSV.zeros[Double](docTopicCounter.length)
+    val d = this.d(docTopicCounter, alpha)
     for (i <- 0 until topics.length) {
       val term = tokens(i)
       val currentTopic = topics(i)
-      val newTopic = metropolisHastingsSampler(rand, w(term), t, docTopicCounter, ttc(term), gtc,
-        beta, alpha, alpha, numToken, numTerms, currentTopic)
-      if (currentTopic != newTopic) {
-        newDocTopicCounter(newTopic) += 1D
-        // docTopicCounter(currentTopic) -= 1D
+      val newTopic = if (rand.nextDouble() < 0.5) {
+        val proposalTopic = gibbsSamplerWord(rand, t, w(term))
+        metropolisHastingsSampler(rand, docTopicCounter, ttc(term),
+          gtc, beta, alpha, alpha, numTokens, numTerms, currentTopic, proposalTopic, false)
+      } else {
+        val proposalTopic = gibbsSamplerDoc(rand, d, alpha, currentTopic)
+        metropolisHastingsSampler(rand, docTopicCounter, ttc(term),
+          gtc, beta, alpha, alpha, numTokens, numTerms, currentTopic, proposalTopic, true)
       }
+      newDocTopicCounter(newTopic) += 1D
+      topics(i) = newTopic
     }
     newDocTopicCounter
   }
@@ -110,42 +118,73 @@ class LDAModel private[mllib](
     w: BSV[Double]): Int = {
     val distSum = rand.nextDouble * (t(numTopics - 1) + w.data(w.used - 1))
     val fun = indexWord(t, w) _
-    LDAUtils.minMaxValueSearch(fun, distSum, numTopics)
+    val topic = LDAUtils.binarySearchInterval(fun, distSum, 0, numTopics, true)
+    math.min(topic, numTopics - 1)
+  }
+
+  private def gibbsSamplerDoc(
+    rand: Random,
+    d: BSV[Double],
+    alpha: Double,
+    currentTopic: Int): Int = {
+    val numTopics = d.length
+    val adjustment = -1D
+    val lastSum = d.data(d.used - 1) + alpha * numTopics
+    val distSum = rand.nextDouble() * lastSum
+    val fun = (topic: Int) => {
+      val lastSum = LDAUtils.binarySearchSparseVector(topic, d)
+      val tSum = alpha * (topic + 1)
+      if (topic >= currentTopic) lastSum + tSum + adjustment else lastSum + tSum
+    }
+    val topic = LDAUtils.binarySearchInterval(fun, distSum, 0, numTopics, true)
+    math.min(topic, numTopics - 1)
   }
 
   @inline private def indexWord(
     t: BDV[Double],
-    w: BSV[Double])(i: Int) = {
-    val lastWS = LDAUtils.maxMinW(i, w)
-    val lastTS = LDAUtils.maxMinT(i, t)
+    w: BSV[Double])(topic: Int) = {
+    val lastWS = LDAUtils.binarySearchSparseVector(topic, w)
+    val lastTS = t(topic)
     lastWS + lastTS
   }
 
   // scalastyle:off
   def metropolisHastingsSampler(
     rand: Random,
-    w: BSV[Double],
-    t: BDV[Double],
     docTopicCounter: BSV[Double],
     termTopicCounter: BSV[Double],
     totalTopicCounter: BDV[Double],
     beta: Double,
     alpha: Double,
     alphaAS: Double,
-    numToken: Double,
+    numTokens: Double,
     numTerms: Double,
-    currentTopic: Int): Int = {
-    val newTopic = gibbsSamplerWord(rand, t, w)
+    currentTopic: Int,
+    newTopic: Int,
+    docProposal: Boolean): Int = {
+    if (newTopic == currentTopic) return currentTopic
+
     val ctp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
-      beta, alpha, alphaAS, numToken, numTerms, currentTopic)
+      beta, alpha, alphaAS, numTokens, numTerms, currentTopic, true)
     val ntp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
-      beta, alpha, alphaAS, numToken, numTerms, newTopic)
-    val cwp = termTopicProb(termTopicCounter, totalTopicCounter, currentTopic, numTerms, beta)
-    val nwp = termTopicProb(termTopicCounter, totalTopicCounter, newTopic, numTerms, beta)
+      beta, alpha, alphaAS, numTokens, numTerms, newTopic, false)
+    val cwp = if (docProposal) {
+      docTopicProb(docTopicCounter, currentTopic, alpha, true)
+    } else {
+      wordTopicProb(termTopicCounter, totalTopicCounter, currentTopic,
+        numTerms, beta)
+    }
+    val nwp = if (docProposal) {
+      docTopicProb(docTopicCounter, newTopic, alpha, false)
+    } else {
+      wordTopicProb(termTopicCounter, totalTopicCounter, newTopic,
+        numTerms, beta)
+    }
     val pi = (ntp * cwp) / (ctp * nwp)
 
     if (rand.nextDouble() < 0.00001) {
       println(s"Model Pi: ${pi}")
+      println(s"($ntp * $cwp) / ($ctp * $nwp) ")
     }
 
     if (rand.nextDouble() < math.min(1.0, pi)) {
@@ -154,6 +193,7 @@ class LDAModel private[mllib](
       currentTopic
     }
   }
+
   // scalastyle:on
 
   @inline private def tokenTopicProb(
@@ -163,22 +203,36 @@ class LDAModel private[mllib](
     beta: Double,
     alpha: Double,
     alphaAS: Double,
-    numToken: Double,
+    numTokens: Double,
     numTerms: Double,
-    topic: Int): Double = {
-    val ratio = (totalTopicCounter(topic) + alphaAS) / (numToken + alphaAS * numTopics)
+    topic: Int,
+    isAdjustment: Boolean): Double = {
+    val ratio = (totalTopicCounter(topic) + alphaAS) / (numTokens + alphaAS * numTopics)
     val asPrior = ratio * (alpha * numTopics)
-    (termTopicCounter(topic) + beta) * (docTopicCounter(topic) + asPrior) /
+    val adjustment = if (isAdjustment) -1.0 else 0.0
+    (termTopicCounter(topic) + beta) * (docTopicCounter(topic) + adjustment + asPrior) /
       (totalTopicCounter(topic) + (numTerms * beta))
   }
 
-  @inline private def termTopicProb(
+  @inline private def wordTopicProb(
     termTopicCounter: BSV[Double],
     totalTopicCounter: BDV[Double],
     topic: Int,
     numTerms: Double,
     beta: Double): Double = {
     (termTopicCounter(topic) + beta) / (totalTopicCounter(topic) + beta * numTerms)
+  }
+
+  @inline private def docTopicProb(
+    docTopicCounter: BSV[Double],
+    topic: Int,
+    alpha: Double,
+    isAdjustment: Boolean): Double = {
+    if (isAdjustment) {
+      docTopicCounter(topic) + alpha - 1
+    } else {
+      docTopicCounter(topic) + alpha
+    }
   }
 
   @transient private lazy val t = {
@@ -208,6 +262,29 @@ class LDAModel private[mllib](
       w(term) = bsv
     }
     w
+  }
+
+
+  @inline private def d(
+    docTopicCounter: BSV[Double],
+    alpha: Double): BSV[Double] = {
+    val numTopics = docTopicCounter.length
+    val used = docTopicCounter.used
+    val index = docTopicCounter.index
+    val data = docTopicCounter.data
+    val d = new Array[Double](used)
+    assert(used > 0)
+    var lastSum = 0D
+    var i = 0
+
+    while (i < used) {
+      val topic = index(i)
+      val lastW = data(i) // + (topic + 1) * alpha
+      lastSum += lastW
+      d(i) = lastSum
+      i += 1
+    }
+    new BSV[Double](index, d, used, numTopics)
   }
 
   private[mllib] def merge(term: Int, topic: Int, inc: Int) = {
