@@ -448,10 +448,10 @@ object LDA {
    * 每次采样的复杂度为 log(K) K 为主题数(应该可以优化为 (2-6)* log(KD) KD 当前文档包含主题数)
    * 1. 使用 Gibbs sampler 采样标准LDA公式中词相关部分:
    * 论文LightLDA: Big Topic Models on Modest Compute Clusters 公式(6):
-   * ( \frac{{n}_{kd}+{\beta }_{w}}{{n}_{k}+\bar{\beta }} )
+   * ( \frac{{n}_{kd}^{-di}+{\beta }_{w}}{{n}_{k}^{-di}+\bar{\beta }} )
    * 2. 把第一步采样得到的概率作为 Proposal q(·) 使用 Metropolis Hastings sampler 采样非对称先验公式
    * 论文 Rethinking LDA: Why Priors Matter 公式(3)
-   * \frac{{n}_{kw}^{-di}+{\beta }_{w}}{{n}_{k}+\bar{\beta}} \frac{{n}_{kd} + \bar{\alpha} \frac{{n}_{k} + \acute{\alpha}}{\sum{n}_{k} +\bar{\acute{\alpha}}}}{\sum{n}_{kd} +\bar{\alpha}}
+   * \frac{{n}_{kw}^{-di}+{\beta }_{w}}{{n}_{k}^{-di}+\bar{\beta}} \frac{{n}_{kd} ^{-di}+ \bar{\alpha} \frac{{n}_{k}^{-di} + \acute{\alpha}}{\sum{n}_{k} +\bar{\acute{\alpha}}}}{\sum{n}_{kd}^{-di} +\bar{\alpha}}
    *
    * 其中
    * \bar{\beta}=\sum_{w}{\beta}_{w}
@@ -505,6 +505,7 @@ object LDA {
       currentTopic
     }
   }
+
   // scalastyle:on
 
   // scalastyle:off
