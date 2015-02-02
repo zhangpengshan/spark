@@ -19,7 +19,9 @@ package org.apache.spark.mllib.clustering
 
 import java.util.Random
 
-import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, sum => brzSum, norm => brzNorm}
+import breeze.linalg.{Vector => BV, DenseVector => BDV, SparseVector => BSV,
+sum => brzSum, norm => brzNorm}
+
 import org.apache.spark.mllib.linalg.{Vectors, DenseVector => SDV, SparseVector => SSV}
 
 class LDAModel private[mllib](
@@ -33,45 +35,84 @@ class LDAModel private[mllib](
       new BSV(t.indices, t.values, t.size)), alpha, beta)
   }
 
-  val (numTopics, numTerms) = (gtc.size, ttc.size)
+  @transient private lazy val alphaAS = alpha
+  @transient private lazy val numTopics = gtc.size
+  @transient private lazy val numTerms = ttc.size
+  @transient private lazy val numTokens = brzSum(gtc)
+  @transient private lazy val betaSum = numTerms * beta
+  @transient private lazy val alphaSum = numTopics * alpha
+  @transient private lazy val termSum = numTokens + alphaAS * numTopics
 
   def globalTopicCounter = Vectors.fromBreeze(gtc)
 
   def topicTermCounter = ttc.map(t => Vectors.fromBreeze(t))
 
-  def inference(doc: SSV, totalIter: Int = 10, burnIn: Int = 5, rand: Random = new Random): SSV = {
+
+  def inference(
+    doc: SSV, totalIter: Int = 10,
+    burnIn: Int = 5,
+    rand: Random = new Random): SSV = {
     require(totalIter > burnIn, "totalIter is less than burnInIter")
     require(totalIter > 0, "totalIter is less than 0")
     require(burnIn > 0, "burnInIter is less than 0")
+
     val topicDist = BSV.zeros[Double](numTopics)
     val bDoc = new BSV[Int](doc.indices, doc.values.map(_.toInt), doc.size)
-    var docTopicCounter = uniformDistSampler(bDoc, rand)
-
+    val tokens = vec2Array(bDoc)
+    val topics = new Array[Int](tokens.length)
+    var docTopicCounter = uniformDistSampler(tokens, topics, rand)
     for (i <- 0 until totalIter) {
-      docTopicCounter = generateTopicDistForDocument(docTopicCounter, bDoc, rand)
+      docTopicCounter = sampleTokens(docTopicCounter, tokens, topics, rand)
       if (i + burnIn >= totalIter) topicDist :+= docTopicCounter
     }
-
+    topicDist.compact()
     topicDist :/= brzNorm(topicDist, 1)
     Vectors.fromBreeze(topicDist).asInstanceOf[SSV]
   }
 
-  private[mllib] def generateTopicDistForDocument(
-    docTopicCounter: BSV[Double],
-    doc: BSV[Int],
-    rand: Random): BSV[Double] = {
-    val newDocTopicCounter = BSV.zeros[Double](numTopics)
-    doc.activeIterator.filter(t => ttc(t._1).used > 0).foreach { kv =>
-      val term = kv._1
-      val cn = kv._2
-      var i = 0
-      while (i < cn) {
-        val newTopic = termMultinomialDistSampler(docTopicCounter, term, rand)
-        newDocTopicCounter(newTopic) += 1
-        i += 1
+  private[mllib] def vec2Array(vec: BV[Int]): Array[Int] = {
+    val docLen = brzSum(vec)
+    var offset = 0
+    val sent = new Array[Int](docLen)
+    vec.activeIterator.foreach { case (term, cn) =>
+      for (i <- 0 until cn) {
+        sent(offset) = term
+        offset += 1
       }
     }
-    newDocTopicCounter
+    sent
+  }
+
+  private[mllib] def sampleTokens(
+    docTopicCounter: BSV[Double],
+    tokens: Array[Int],
+    topics: Array[Int],
+    rand: Random): BSV[Double] = {
+    for (i <- 0 until topics.length) {
+      val term = tokens(i)
+      val currentTopic = topics(i)
+      val newTopic = termMultinomialDistSampler(docTopicCounter, term, rand)
+      docTopicCounter(newTopic) += 1D
+      docTopicCounter(currentTopic) -= 1D
+      topics(i) = newTopic
+      if (docTopicCounter(currentTopic) == 0) {
+        docTopicCounter.compact()
+      }
+    }
+    docTopicCounter
+  }
+
+  private[mllib] def uniformDistSampler(
+    tokens: Array[Int],
+    topics: Array[Int],
+    rand: Random): BSV[Double] = {
+    val docTopicCounter = BSV.zeros[Double](numTopics)
+    for (i <- 0 until tokens.length) {
+      val topic = LDAUtils.uniformDistSampler(rand, numTopics)
+      topics(i) = topic
+      docTopicCounter(topic) += 1D
+    }
+    docTopicCounter
   }
 
   private[mllib] def termMultinomialDistSampler(
@@ -91,21 +132,18 @@ class LDAModel private[mllib](
     docTopicCounter
   }
 
-  /**
-   * A multinomial distribution sampler, using roulette method to sample an Int back.
-   */
   @inline private def multinomialDistSampler(rand: Random, t: BDV[Double],
     w: BSV[Double], docTopicCounter: BSV[Double], d: BDV[Double]): Int = {
     val distSum = rand.nextDouble * (t(numTopics - 1) + w.data(w.used - 1) + d(numTopics - 1))
     val fun = index(t, w, docTopicCounter, d) _
-    LDAUtils.minMaxValueSearch(fun, distSum, numTopics)
+    LDAUtils.binarySearchInterval(fun, distSum, 0, numTopics, true)
   }
 
   @inline private def index(t: BDV[Double],
-    w: BSV[Double], docTopicCounter: BSV[Double], d: BDV[Double])(i: Int) = {
-    val lastDS = LDAUtils.maxMinD(i, docTopicCounter, d)
-    val lastWS = LDAUtils.maxMinW(i, w)
-    val lastTS = LDAUtils.maxMinT(i, t)
+    w: BSV[Double], docTopicCounter: BSV[Double], d: BDV[Double])(topic: Int) = {
+    val lastDS = maxMinD(topic, docTopicCounter, d)
+    val lastWS = LDAUtils.binarySearchSparseVector(topic, w)
+    val lastTS = t(topic)
     lastDS + lastWS + lastTS
   }
 
@@ -115,14 +153,30 @@ class LDAModel private[mllib](
     }
   }
 
+  @inline private def maxMinD[V](topic: Int, docTopicCounter: BSV[V], d: BDV[Double]) = {
+    val pos = LDAUtils.binarySearchArray(docTopicCounter.index,
+      topic, 0, docTopicCounter.used, false)
+    if (pos > -1) {
+      d(docTopicCounter.index(pos))
+    }
+    else {
+      0D
+    }
+  }
+
   @inline private def d(docTopicCounter: BSV[Double], term: Int): BDV[Double] = {
     val d = localD.get()
-    var i = 0
+    val used = docTopicCounter.used
+    val index = docTopicCounter.index
+    val data = docTopicCounter.data
+
     var lastSum = 0D
-    docTopicCounter.activeIterator.foreach { t =>
-      val topic = t._1
-      val cn = t._2
-      val lastD = cn * (ttc(term)(topic) + beta) / (gtc(topic) + (numTerms * beta))
+    var i = 0
+    while (i < used) {
+      val topic = index(i)
+      val count = data(i)
+      val lastD = count * termSum * (ttc(term)(topic) + beta) /
+        ((gtc(topic) + betaSum) * termSum)
       lastSum += lastD
       d(topic) = lastSum
       i += 1
@@ -134,10 +188,11 @@ class LDAModel private[mllib](
   @transient private lazy val t = {
     val t = BDV.zeros[Double](numTopics)
     var lastSum = 0D
-    for (i <- 0 until numTopics) {
-      t(i) = alpha * beta / (gtc(i) + (numTerms * beta))
-      lastSum = t(i) + lastSum
-      t(i) = lastSum
+    for (topic <- 0 until numTopics) {
+      val lastT = beta * alphaSum * (gtc(topic) + alphaAS) /
+        ((gtc(topic) + betaSum) * termSum)
+      lastSum += lastT
+      t(topic) = lastSum
     }
     t
   }
@@ -148,8 +203,9 @@ class LDAModel private[mllib](
       w(term) = BSV.zeros[Double](numTopics)
       var lastSum = 0D
       ttc(term).activeIterator.foreach { case (topic, cn) =>
-        w(term)(topic) = alpha * cn / (gtc(topic) + (numTerms * beta))
-        lastSum = w(term)(topic) + lastSum
+        val lastW = cn * alphaSum * (gtc(topic) + alphaAS) /
+          ((gtc(topic) + betaSum) * termSum)
+        lastSum += lastW
         w(term)(topic) = lastSum
       }
     }

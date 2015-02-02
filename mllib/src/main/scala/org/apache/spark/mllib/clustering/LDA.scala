@@ -19,8 +19,8 @@ package org.apache.spark.mllib.clustering
 
 import java.util.Random
 
-
 import scala.collection.mutable
+import scala.reflect.ClassTag
 
 import breeze.linalg.{DenseVector => BDV, SparseVector => BSV, sum => brzSum}
 
@@ -152,6 +152,7 @@ class LDA private[mllib](
 
   def runGibbsSampling(iterations: Int): Unit = {
     for (iter <- 1 to iterations) {
+      println(s"perplexity $iter: ${perplexity}")
       logInfo(s"Start Gibbs sampling (Iteration $iter/$iterations)")
       gibbsSampling()
     }
@@ -402,28 +403,35 @@ object LDA {
     corpus
   }
 
-  private def initializeEdges(gen: Random, doc: BSV[Int], docId: DocId, numTopics: Int,
+  private def initializeEdges(
+    gen: Random,
+    doc: BSV[Int],
+    docId: DocId,
+    numTopics: Int,
     computedModel: LDAModel = null): Array[Edge[ED]] = {
     assert(docId >= 0)
     val newDocId: DocId = -(docId + 1L)
     if (computedModel == null) {
       doc.activeIterator.map { case (term, counter) =>
-        val topic = (0 until counter).map { i =>
+        val ev = (0 until counter).map { i =>
           uniformDistSampler(gen, numTopics)
         }.toArray
-        Edge(term, newDocId, topic)
+        Edge(term, newDocId, ev)
       }.toArray
     }
     else {
-      var docTopicCounter = computedModel.uniformDistSampler(doc, gen)
-      (0 to 10).foreach(t => {
-        docTopicCounter = computedModel.generateTopicDistForDocument(docTopicCounter, doc, gen)
-      })
+      val tokens = computedModel.vec2Array(doc)
+      val topics = new Array[Int](tokens.length)
+      var docTopicCounter = computedModel.uniformDistSampler(tokens, topics, gen)
+      for (t <- 0 until 15) {
+        docTopicCounter = computedModel.sampleTokens(docTopicCounter,
+          tokens, topics, gen)
+      }
       doc.activeIterator.map { case (term, counter) =>
-        val topic = (0 until counter).map { i =>
-          computedModel.termMultinomialDistSampler(docTopicCounter, term, gen)
-        }.toArray
-        Edge(term, newDocId, topic)
+        val ev = topics.zipWithIndex.filter { case (topic, offset) =>
+          term == tokens(offset)
+        }.map(_._1)
+        Edge(term, newDocId, ev)
       }.toArray
     }
   }
@@ -437,19 +445,21 @@ object LDA {
     val numTopics = d.length
     val lastSum = t(numTopics - 1) + w.data(w.used - 1) + d(numTopics - 1) + adjustment
     val distSum = rand.nextDouble() * lastSum
-    if (distSum >= lastSum) {
-      return numTopics - 1
-    }
     val fun = index(docTopicCounter, d, w, t, adjustment, currentTopic) _
-    minMaxValueSearch(fun, distSum, numTopics)
+    val topic = binarySearchInterval(fun, distSum, 0, numTopics, true)
+    math.min(topic, numTopics - 1)
   }
 
-  @inline private def index(docTopicCounter: BSV[Count],
-    d: BDV[Double], w: BSV[Double], t: BDV[Double],
-    adjustment: Double, currentTopic: Int)(i: Int) = {
+  @inline private def index(
+    docTopicCounter: BSV[Count],
+    d: BDV[Double],
+    w: BSV[Double],
+    t: BDV[Double],
+    adjustment: Double,
+    currentTopic: Int)(i: Int) = {
     val lastDS = maxMinD(i, docTopicCounter, d)
-    val lastWS = maxMinW(i, w)
-    val lastTS = maxMinT(i, t)
+    val lastWS = binarySearchSparseVector(i, w)
+    val lastTS = t(i)
     if (i >= currentTopic) {
       lastDS + lastWS + lastTS + adjustment
     } else {
@@ -594,104 +604,80 @@ object LDAUtils {
     rand.nextInt(dimension)
   }
 
-  @inline private[mllib] def minMaxIndexSearch[V](v: BSV[V], i: Int,
-    lastReturnedPos: Int): Int = {
-    val array = v.array
-    val index = array.index
-    if (array.activeSize == 0) return -1
-    if (index(0) > i) return -1
-    if (lastReturnedPos >= array.activeSize - 1) return array.activeSize - 1
-    var begin = lastReturnedPos
-    var end = array.activeSize - 1
-    var found = false
-    if (end > i) end = i
-    if (begin < 0) begin = 0
 
-    var mid = (end + begin) >> 1
-
-    while (!found && begin <= end) {
-      if (index(mid) < i) {
-        begin = mid + 1
-        mid = (end + begin) >> 1
-      }
-      else if (index(mid) > i) {
-        end = mid - 1
-        mid = (end + begin) >> 1
-      }
-      else {
-        found = true
-      }
-    }
-
-    val minMax = if (found || index(mid) < i || mid == 0) {
-      mid
-    }
-    else {
-      mid - 1
-    }
-    assert(index(minMax) <= i)
-    if (minMax < array.activeSize - 1) assert(index(minMax + 1) > i)
-    minMax
+  def binarySearchArray[K](
+    index: Array[K],
+    key: K,
+    begin: Int,
+    end: Int,
+    greater: Boolean)(implicit ord: Ordering[K], ctag: ClassTag[K]): Int = {
+    binarySearchInterval(i => index(i), key, begin, end, greater)
   }
 
-  @inline private[mllib] def minMaxValueSearch(index: (Int) => Double, distSum: Double,
-    numTopics: Int): Int = {
-    var begin = 0
-    var end = numTopics - 1
-    var found = false
-    var mid = (end + begin) >> 1
-    var sum = 0D
-    var isLeft = false
-    while (!found && begin <= end) {
-      sum = index(mid)
-      if (sum < distSum) {
-        isLeft = false
-        begin = mid + 1
-        mid = (end + begin) >> 1
+  def binarySearchInterval[K](
+    index: Int => K,
+    key: K,
+    begin: Int,
+    end: Int,
+    greater: Boolean)(implicit ord: Ordering[K], ctag: ClassTag[K]): Int = {
+    if (begin == end) {
+      return if (greater) end else begin - 1
+    }
+    var b = begin
+    var e = end - 1
+
+    var mid: Int = (e + b) >> 1
+    while (b <= e) {
+      mid = (e + b) >> 1
+      if (ord.lt(index(mid), key)) {
+        b = mid + 1
       }
-      else if (sum > distSum) {
-        isLeft = true
-        end = mid - 1
-        mid = (end + begin) >> 1
+      else if (ord.gt(index(mid), key)) {
+        e = mid - 1
       }
       else {
-        found = true
+        return mid
       }
     }
-
-    val topic = if (found) {
+    mid = if ((greater && ord.gteq(index(mid), key)) || (!greater && ord.lteq(index(mid), key))) {
       mid
     }
-    else if (sum < distSum || isLeft) {
+    else if (greater) {
       mid + 1
-    } else {
+    }
+    else {
       mid - 1
     }
-
-    assert(index(topic) >= distSum)
-    if (topic > 0) assert(index(topic - 1) <= distSum)
-    topic
+    if (greater) {
+      if (mid < end) assert(ord.gteq(index(mid), key))
+      if (mid > 0) assert(ord.lteq(index(mid - 1), key))
+    } else {
+      if (mid > 0) assert(ord.lteq(index(mid), key))
+      if (mid < end - 1) assert(ord.gteq(index(mid + 1), key))
+    }
+    mid
   }
 
-  @inline private[mllib] def maxMinD[V](i: Int, docTopicCounter: BSV[V], d: BDV[Double]) = {
-    val lastReturnedPos = minMaxIndexSearch(docTopicCounter, i, -1)
-    if (lastReturnedPos > -1) {
-      d(docTopicCounter.index(lastReturnedPos))
+  @inline private[mllib] def binarySearchSparseVector(index: Int, w: BSV[Double]) = {
+    val pos = binarySearchArray(w.index, index, 0, w.used, false)
+    if (pos > -1) {
+      w.data(pos)
     }
     else {
       0D
     }
   }
 
-  @inline private[mllib] def maxMinW(i: Int, w: BSV[Double]) = {
-    val lastReturnedPos = minMaxIndexSearch(w, i, -1)
-    if (lastReturnedPos > -1) {
-      w.data(lastReturnedPos)
+  @inline private[mllib] def maxMinD[V](index: Int, docTopicCounter: BSV[V], d: BDV[Double]) = {
+    val pos = binarySearchArray(docTopicCounter.index, index, 0, docTopicCounter.used, false)
+    if (pos > -1) {
+      d(docTopicCounter.index(pos))
     }
     else {
       0D
     }
   }
+
 
   @inline private[mllib] def maxMinT(i: Int, t: BDV[Double]) = {
     t(i)
