@@ -297,14 +297,12 @@ object LDA {
     beta: Double,
     alphaAS: Double): Graph[VD, ED] = {
     val parts = graph.edges.partitions.size
-    val broadcastW = graph.edges.sparkContext.broadcast(
-      mutable.Map[VertexId, (BSV[Double], BSV[Double])]())
     graph.mapTriplets(
       (pid, iter) => {
         val gen = new XORShiftRandom(parts * innerIter + pid)
         val d = BDV.zeros[Double](numTopics)
         val d1 = BDV.zeros[Double](numTopics)
-        val wCache = broadcastW.value
+        val wCache = mutable.Map[VertexId, (BSV[Double], BSV[Double])]()
         var tT: (BDV[Double], BDV[Double]) = null
         iter.map {
           triplet =>
@@ -317,10 +315,8 @@ object LDA {
                 d, d1, numTokens, numTerms, numTopics, beta, alphaAS)
             }
             val (w, w1) = termTopicCounter.synchronized {
-              wCache.synchronized {
-                wCache.getOrElseUpdate(term, this.w(totalTopicCounter, termTopicCounter,
-                  numTokens, numTerms, numTopics, alpha, beta, alphaAS))
-              }
+              wCache.getOrElseUpdate(term, this.w(totalTopicCounter, termTopicCounter,
+                numTokens, numTerms, numTopics, alpha, beta, alphaAS))
             }
 
             if (tT == null) tT = LDA.t(totalTopicCounter, numTokens, numTerms,
@@ -332,12 +328,12 @@ object LDA {
               val adjustment = d1(currentTopic) + w1(currentTopic) + t1(currentTopic)
               val newTopic = docTopicCounter.synchronized {
                 termTopicCounter.synchronized {
-                  multinomialDistSampler(gen, docTopicCounter, d, w, t,
-                    adjustment, currentTopic)
+                  multinomialDistSampler(gen, docTopicCounter, d, w, t, adjustment, currentTopic)
                 }
               }
-              assert(newTopic < numTopics)
+
               if (currentTopic != newTopic) {
+
                 docTopicCounter.synchronized {
                   docTopicCounter(currentTopic) -= 1
                   docTopicCounter(newTopic) += 1
@@ -345,6 +341,7 @@ object LDA {
                     docTopicCounter.compact()
                   }
                 }
+
                 termTopicCounter.synchronized {
                   termTopicCounter(currentTopic) -= 1
                   termTopicCounter(newTopic) += 1
@@ -360,8 +357,9 @@ object LDA {
                   wCache -= term
                   tT = null
                 }
+
+                topics(i) = newTopic
               }
-              topics(i) = newTopic
               i += 1
             }
             topics
