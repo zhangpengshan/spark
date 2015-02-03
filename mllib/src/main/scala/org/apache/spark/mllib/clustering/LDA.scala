@@ -303,11 +303,12 @@ object LDA {
     alphaAS: Double,
     beta: Double): Graph[VD, ED] = {
     val parts = graph.edges.partitions.size
-    graph.mapTriplets(
+    val broadcast = graph.edges.context.broadcast((mutable.Map[VertexId, (BSV[Double], BSV[Double])](),
+      mutable.Map[VertexId, BSV[Double]]()))
+    val nweGraph = graph.mapTriplets(
       (pid, iter) => {
         val rand = new XORShiftRandom(parts * innerIter + pid)
-        val wMap = mutable.Map[VertexId, (BSV[Double], BSV[Double])]()
-        val dMap = mutable.Map[VertexId, BSV[Double]]()
+        val (wMap, dMap) = broadcast.value
         var dAS: BDV[Double] = null
         var tT: (BDV[Double], BDV[Double]) = null
 
@@ -318,7 +319,8 @@ object LDA {
             val termTopicCounter = triplet.srcAttr
             val docTopicCounter = triplet.dstAttr
             val topics = triplet.attr
-
+            val dAS1 = -1D * (alpha * numTopics) / (numTokens - 1D + alphaAS * numTopics)
+            val d1 = -1D
             var maxSampleing = 8
             while (maxSampleing > 0) {
               maxSampleing -= 1
@@ -329,19 +331,22 @@ object LDA {
                 val proposalTopic = if (docProposal) {
                   if (dAS == null) dAS = this.dAS(totalTopicCounter, alpha, alphaAS, numTokens)
                   val d = docTopicCounter.synchronized {
-                    dMap.getOrElseUpdate(docId, this.d(docTopicCounter, alpha))
+                    dMap.synchronized {
+                      dMap.getOrElseUpdate(docId, this.d(docTopicCounter, dAS, alpha))
+                    }
                   }
-                  gibbsSamplerDoc(rand, d, dAS, alpha, alphaAS, numTokens, currentTopic)
+                  gibbsSampler(rand, d, dAS, d1, dAS1, currentTopic)
                 } else {
                   if (tT == null) tT = LDA.t(totalTopicCounter, numTopics, beta)
                   val (t, t1) = tT
                   val (w, w1) = termTopicCounter.synchronized {
-                    wMap.getOrElseUpdate(termId, this.w(totalTopicCounter, t,
-                      termTopicCounter, numTerms, beta))
+                    wMap.synchronized {
+                      wMap.getOrElseUpdate(termId, this.w(totalTopicCounter, t,
+                        termTopicCounter, numTerms, beta))
+                    }
                   }
-                  gibbsSamplerWord(rand, w, t, w1, t1, currentTopic)
+                  gibbsSampler(rand, w, t, w1(currentTopic), t1(currentTopic), currentTopic)
                 }
-
                 val newTopic = docTopicCounter.synchronized {
                   termTopicCounter.synchronized {
                     metropolisHastingsSampler(rand, docTopicCounter, termTopicCounter,
@@ -349,14 +354,18 @@ object LDA {
                       currentTopic, proposalTopic, docProposal)
                   }
                 }
-
+                assert(newTopic < numTopics)
                 if (newTopic != currentTopic) {
-                  tT = null
-                  dAS = null
-                  dMap -= docId
-                  wMap -= termId
-                  totalTopicCounter(currentTopic) -= 1
-                  totalTopicCounter(newTopic) += 1
+                  dMap.synchronized {
+                    dMap -= docId
+                  }
+                  if (rand.nextDouble() < 0.0001) {
+                    tT = null
+                    dAS = null
+                    dMap.synchronized {
+                      wMap -= termId
+                    }
+                  }
 
                   docTopicCounter.synchronized {
                     docTopicCounter(currentTopic) -= 1
@@ -373,6 +382,10 @@ object LDA {
                     }
                   }
 
+                  totalTopicCounter(currentTopic) -= 1
+                  totalTopicCounter(newTopic) += 1
+
+
                   topics(i) = newTopic
                 }
                 i += 1
@@ -381,6 +394,8 @@ object LDA {
             topics
         }
       }, TripletFields.All)
+    broadcast.unpersist(false)
+    nweGraph
   }
 
   private def updateCounter(graph: Graph[VD, ED], numTopics: Int): Graph[VD, ED] = {
@@ -525,7 +540,7 @@ object LDA {
     }
     val pi = (ntp * cwp) / (ctp * nwp)
 
-    if (rand.nextDouble() < 0.000001) {
+    if (rand.nextDouble() < 1e-6) {
       println(s"Pi: $docProposal ${pi}")
       println(s"($ntp * $cwp) / ($ctp * $nwp) ")
     }
@@ -604,26 +619,60 @@ object LDA {
     }
   }
 
-  /**
-   * \frac{{n}_{kw}+{\beta}_{w}}{{n}_{k}+\bar{\beta}}
-   */
-  @inline private def gibbsSamplerWord(
+  private def gibbsSampler(
     rand: Random,
-    w: BSV[Double],
-    t: BDV[Double],
-    w1: BSV[Double],
-    t1: BDV[Double],
+    sv: BSV[Double],
+    dv: BDV[Double],
+    adjustmentSV: Double,
+    adjustmentDV: Double,
     currentTopic: Int): Int = {
-    val numTopics = w.length
-    val adjustment = w1(currentTopic) + t1(currentTopic)
-    val lastSum = w.data(w.used - 1) + t(numTopics - 1) + adjustment
-    val distSum = rand.nextDouble() * lastSum
-    val fun = (topic: Int) => {
-      val lastWS = LDAUtils.binarySearchSparseVector(topic, w)
-      val lastTS = t(topic)
-      if (topic >= currentTopic) lastWS + lastTS + adjustment else lastWS + lastTS
+    // 搜索稀疏向量
+    val numTopics = sv.length
+    val used = sv.used
+    val data = sv.data
+    val index = sv.index
+
+    val adjustment = adjustmentDV + adjustmentSV
+    val lastSum = data(used - 1) - dv(index(used - 1)) + dv(numTopics - 1) + adjustment
+    var distSum = rand.nextDouble() * lastSum
+
+    val fun = (i: Int) => if (index(i) >= currentTopic) data(i) + adjustment else data(i)
+    val pos = binarySearchInterval(fun, distSum, 0, used, true)
+
+    if (pos < used && distSum == data(pos)) return index(pos)
+    if (pos == 0) {
+      val a = if (index.head >= currentTopic) adjustmentDV else 0.0
+      val withOutPos = dv(index.head) + a
+      if (withOutPos <= distSum) return index.head
     }
-    val topic = binarySearchInterval(fun, distSum, 0, numTopics, true)
+    else if (pos < used) {
+      val a = if (index(pos - 1) >= currentTopic) adjustment else 0.0
+      val withOutPos = data(pos - 1) - dv(index(pos - 1)) + dv(index(pos)) + a
+      if (withOutPos <= distSum) return index(pos)
+    }
+
+    var b = 0
+    var e = numTopics
+    if (pos == 0) {
+      e = index.head + 1
+    } else if (pos == used) {
+      b = index(used - 1)
+      val sumW = data(used - 1) - dv(b) + adjustmentSV
+      distSum = distSum - sumW
+    } else if (index(pos - 1) >= currentTopic) {
+      b = index(pos - 1)
+      e = index(pos) + 1
+      val sumW = data(pos - 1) - dv(b) + adjustmentSV
+      distSum = distSum - sumW
+    } else {
+      b = index(pos - 1)
+      e = index(pos) + 1
+      val sumW = data(pos - 1) - dv(b)
+      distSum = distSum - sumW
+    }
+    // 搜索稠密向量
+    val dvFun = (i: Int) => if (i >= currentTopic) dv.data(i) + adjustmentDV else dv.data(i)
+    val topic = binarySearchInterval(dvFun, distSum, b, e, true)
     math.min(topic, numTopics - 1)
   }
 
@@ -639,7 +688,7 @@ object LDA {
     val numTopics = termTopicCounter.length
     val termSum = beta * numTerms
     val used = termTopicCounter.used
-    val index = termTopicCounter.index
+    val index = termTopicCounter.index.slice(0, used)
     val data = termTopicCounter.data
     val w = new Array[Double](used)
     val w1 = new Array[Double](used)
@@ -653,33 +702,12 @@ object LDA {
       val lastW = count / (totalTopicCounter(topic) + termSum)
       val lastW1 = (count - 1D) / (totalTopicCounter(topic) - 1D + termSum)
       lastSum += lastW
-      w(i) = lastSum // + t(topic)
+      w(i) = lastSum + t(topic)
       w1(i) = lastW1 - lastW
       i += 1
     }
     (new BSV[Double](index, w, used, numTopics),
       new BSV[Double](index, w1, used, numTopics))
-  }
-
-  @inline private def gibbsSamplerDoc(
-    rand: Random,
-    d: BSV[Double],
-    dAS: BDV[Double],
-    alpha: Double,
-    alphaR: Double,
-    numTokens: Double,
-    currentTopic: Int): Int = {
-    val numTopics = d.length
-    val adjustment = -1D - alpha * numTopics / (numTokens - 1 + alphaR * numTopics)
-    val lastSum = d.data(d.used - 1) + dAS(numTopics - 1) + adjustment
-    val distSum = rand.nextDouble() * lastSum
-    val fun = (topic: Int) => {
-      val lastSum = LDAUtils.binarySearchSparseVector(topic, d)
-      val tSum = dAS(topic)
-      if (topic >= currentTopic) lastSum + tSum + adjustment else lastSum + tSum
-    }
-    val topic = binarySearchInterval(fun, distSum, 0, numTopics, true)
-    math.min(topic, numTopics - 1)
   }
 
   @inline private def dAS(
@@ -689,12 +717,11 @@ object LDA {
     numTokens: Double): BDV[Double] = {
     val numTopics = totalTopicCounter.length
     val asPrior = BDV.zeros[Double](numTopics)
-    val termSum = numTokens - 1 + alphaAS * numTopics
+    val termSum = numTokens - 1D + alphaAS * numTopics
     val alphaSum = alpha * numTopics
     var lastSum = 0.0
     for (topic <- 0 until numTopics) {
-      val ratio = (totalTopicCounter(topic) + alphaAS) / termSum
-      val lastA = ratio * alphaSum
+      val lastA = alphaSum * (totalTopicCounter(topic) + alphaAS) / termSum
       lastSum += lastA
       asPrior(topic) = lastSum
     }
@@ -703,21 +730,21 @@ object LDA {
 
   @inline private def d(
     docTopicCounter: VD,
+    dAS: BDV[Double],
     alpha: Double): BSV[Double] = {
     val numTopics = docTopicCounter.length
     val used = docTopicCounter.used
-    val index = docTopicCounter.index
+    val index = docTopicCounter.index.slice(0, used)
     val data = docTopicCounter.data
     val d = new Array[Double](used)
 
     var lastSum = 0D
     var i = 0
-
     while (i < used) {
       val topic = index(i)
-      val lastW = data(i) // + (topic + 1) * alpha
-      lastSum += lastW
-      d(i) = lastSum
+      val lastD = data(i)
+      lastSum += lastD
+      d(i) = lastSum + dAS(topic)
       i += 1
     }
     new BSV[Double](index, d, used, numTopics)
@@ -728,12 +755,13 @@ object LDA {
    */
   private def t(
     totalTopicCounter: BDV[Count],
-    numTerm: Int,
+    numTerms: Int,
     beta: Double): (BDV[Double], BDV[Double]) = {
     val numTopics = totalTopicCounter.length
     val t = BDV.zeros[Double](numTopics)
     val t1 = BDV.zeros[Double](numTopics)
-    val termSum = beta * numTerm
+
+    val termSum = beta * numTerms
 
     var lastTsum = 0D
     for (topic <- 0 until numTopics) {
@@ -780,17 +808,19 @@ object LDAUtils {
     var mid: Int = (e + b) >> 1
     while (b <= e) {
       mid = (e + b) >> 1
-      if (ord.lt(index(mid), key)) {
+      val v = index(mid)
+      if (ord.lt(v, key)) {
         b = mid + 1
       }
-      else if (ord.gt(index(mid), key)) {
+      else if (ord.gt(v, key)) {
         e = mid - 1
       }
       else {
         return mid
       }
     }
-    mid = if ((greater && ord.gteq(index(mid), key)) || (!greater && ord.lteq(index(mid), key))) {
+    val v = index(mid)
+    mid = if ((greater && ord.gteq(v, key)) || (!greater && ord.lteq(v, key))) {
       mid
     }
     else if (greater) {
@@ -799,13 +829,13 @@ object LDAUtils {
     else {
       mid - 1
     }
-    if (greater) {
-      if (mid < end) assert(ord.gteq(index(mid), key))
-      if (mid > 0) assert(ord.lteq(index(mid - 1), key))
-    } else {
-      if (mid > 0) assert(ord.lteq(index(mid), key))
-      if (mid < end - 1) assert(ord.gteq(index(mid + 1), key))
-    }
+    //  if (greater) {
+    //    if (mid < end) assert(ord.gteq(index(mid), key))
+    //    if (mid > 0) assert(ord.lteq(index(mid - 1), key))
+    //  } else {
+    //    if (mid > 0) assert(ord.lteq(index(mid), key))
+    //    if (mid < end - 1) assert(ord.gteq(index(mid + 1), key))
+    //  }
     mid
   }
 
