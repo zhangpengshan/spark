@@ -53,7 +53,7 @@ class LDAModel private[mllib](
     val topics = new Array[Int](tokens.length)
     var docTopicCounter = uniformDistSampler(tokens, topics, rand)
     for (i <- 0 until totalIter) {
-      docTopicCounter = generateTopicDistForDocument(docTopicCounter, tokens, topics, rand)
+      docTopicCounter = sampleTokens(docTopicCounter, tokens, topics, rand)
       if (i + burnIn >= totalIter) topicDist :+= docTopicCounter
     }
     topicDist.compact()
@@ -74,29 +74,37 @@ class LDAModel private[mllib](
     sent
   }
 
-  private[mllib] def generateTopicDistForDocument(
+  private[mllib] def sampleTokens(
     docTopicCounter: BSV[Double],
     tokens: Array[Int],
     topics: Array[Int],
     rand: Random): BSV[Double] = {
-    val newDocTopicCounter = BSV.zeros[Double](docTopicCounter.length)
-    val d = this.d(docTopicCounter, alpha)
+    var d: BSV[Double] = null
     for (i <- 0 until topics.length) {
       val term = tokens(i)
       val currentTopic = topics(i)
-      val newTopic = if (rand.nextDouble() < 0.5) {
-        val proposalTopic = gibbsSamplerWord(rand, t, w(term))
-        metropolisHastingsSampler(rand, docTopicCounter, ttc(term),
-          gtc, beta, alpha, alpha, numTokens, numTerms, currentTopic, proposalTopic, false)
+      val docProposal = rand.nextDouble() < 0.5
+      val proposalTopic = if (docProposal) {
+        gibbsSamplerWord(rand, t, w(term))
       } else {
-        val proposalTopic = gibbsSamplerDoc(rand, d, alpha, currentTopic)
-        metropolisHastingsSampler(rand, docTopicCounter, ttc(term),
-          gtc, beta, alpha, alpha, numTokens, numTerms, currentTopic, proposalTopic, true)
+        if (d == null) d = this.d(docTopicCounter, alpha)
+        gibbsSamplerDoc(rand, d, alpha, currentTopic)
       }
-      newDocTopicCounter(newTopic) += 1D
+      val newTopic = metropolisHastingsSampler(rand, docTopicCounter, ttc(term),
+        gtc, beta, alpha, alpha, numTokens, numTerms, currentTopic,
+        proposalTopic, docProposal)
+
+      if (newTopic != currentTopic) {
+        docTopicCounter(currentTopic) -= 1D
+        docTopicCounter(newTopic) += 1D
+        if (docTopicCounter(currentTopic) == 0) {
+          docTopicCounter.compact()
+        }
+        d = null
+      }
       topics(i) = newTopic
     }
-    newDocTopicCounter
+    docTopicCounter
   }
 
   private[mllib] def uniformDistSampler(
@@ -129,7 +137,7 @@ class LDAModel private[mllib](
     currentTopic: Int): Int = {
     val numTopics = d.length
     val adjustment = -1D
-    val lastSum = d.data(d.used - 1) + alpha * numTopics
+    val lastSum = d.data(d.used - 1) + alpha * numTopics + adjustment
     val distSum = rand.nextDouble() * lastSum
     val fun = (topic: Int) => {
       val lastSum = LDAUtils.binarySearchSparseVector(topic, d)

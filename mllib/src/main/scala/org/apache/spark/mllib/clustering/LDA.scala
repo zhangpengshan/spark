@@ -67,13 +67,13 @@ class LDA private[mllib](
   /**
    * 语料库总的词数(包含重复)
    */
-  private val sumToken = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
+  private val numTokens = corpus.edges.map(e => e.attr.size.toDouble).sum().toLong
   // scalastyle:on
 
   @transient private val sc = corpus.vertices.context
   @transient private val seed = new Random().nextInt()
   @transient private var innerIter = 1
-  @transient private var globalParameter: GlobalParameter = collectGlobalParameter(corpus)
+  @transient private var totalTopicCounter: BDV[Count] = collectTotalTopicCounter(corpus)
 
   private def termVertices = corpus.vertices.filter(t => t._1 >= 0)
 
@@ -89,31 +89,28 @@ class LDA private[mllib](
     }
   }
 
-  private def collectGlobalParameter(graph: Graph[VD, ED]): GlobalParameter = {
+  private def collectTotalTopicCounter(graph: Graph[VD, ED]): BDV[Count] = {
     val globalTopicCounter = collectGlobalCounter(graph, numTopics)
-    assert(brzSum(globalTopicCounter) == sumToken)
-    val (t, t1) = LDA.t(globalTopicCounter, numTopics, beta)
-    GlobalParameter(globalTopicCounter, t, t1)
+    assert(brzSum(globalTopicCounter) == numTokens)
+    globalTopicCounter
   }
 
   private def gibbsSampling(): Unit = {
-    val broadcast = sc.broadcast(globalParameter)
-    val sampleCorpus = sampleTokens(corpus, broadcast,
-      innerIter + seed, sumToken, numTopics, numTerms, alpha, beta, alphaAS)
+    val sampleCorpus = sampleTokens(corpus, totalTopicCounter, innerIter + seed,
+      numTokens, numTopics, numTerms, alpha, alphaAS, beta)
     sampleCorpus.persist(storageLevel)
 
     val counterCorpus = updateCounter(sampleCorpus, numTopics)
     counterCorpus.persist(storageLevel)
     // counterCorpus.vertices.count()
     counterCorpus.edges.count()
-    globalParameter = collectGlobalParameter(counterCorpus)
+    totalTopicCounter = collectTotalTopicCounter(counterCorpus)
 
     corpus.edges.unpersist(false)
     corpus.vertices.unpersist(false)
     sampleCorpus.edges.unpersist(false)
     sampleCorpus.vertices.unpersist(false)
     corpus = counterCorpus
-    broadcast.unpersist(false)
 
     checkpoint()
     innerIter += 1
@@ -151,6 +148,7 @@ class LDA private[mllib](
 
   def runGibbsSampling(iterations: Int): Unit = {
     for (iter <- 1 to iterations) {
+      println(s"perplexity $iter: ${perplexity()}")
       logInfo(s"Start Gibbs sampling (Iteration $iter/$iterations)")
       gibbsSampling()
     }
@@ -194,7 +192,7 @@ class LDA private[mllib](
    */
   // scalastyle:on
   def perplexity(): Double = {
-    val totalTopicCounter = this.globalParameter.totalTopicCounter
+    val totalTopicCounter = this.totalTopicCounter
     val numTopics = this.numTopics
     val numTerms = this.numTerms
     val alpha = this.alpha
@@ -259,11 +257,6 @@ object LDA {
   private[mllib] type ED = Array[Count]
   private[mllib] type VD = BSV[Count]
 
-  private[mllib] case class GlobalParameter(totalTopicCounter: BDV[Count],
-    t: BDV[Double], t1: BDV[Double])
-
-  private[mllib] case class Parameter(counter: BSV[Count], dist: BSV[Double], dist1: BSV[Double])
-
   def train(docs: RDD[(DocId, SSV)],
     numTopics: Int = 2048,
     totalIter: Int = 150,
@@ -301,21 +294,23 @@ object LDA {
 
   private[mllib] def sampleTokens(
     graph: Graph[VD, ED],
-    broadcast: Broadcast[GlobalParameter],
+    totalTopicCounter: BDV[Count],
     innerIter: Long,
-    sumTerms: Long,
+    numTokens: Long,
     numTopics: Int,
     numTerms: Int,
     alpha: Double,
-    beta: Double,
-    alphaAS: Double): Graph[VD, ED] = {
+    alphaAS: Double,
+    beta: Double): Graph[VD, ED] = {
     val parts = graph.edges.partitions.size
     graph.mapTriplets(
       (pid, iter) => {
         val rand = new XORShiftRandom(parts * innerIter + pid)
         val wMap = mutable.Map[VertexId, (BSV[Double], BSV[Double])]()
         val dMap = mutable.Map[VertexId, BSV[Double]]()
-        val GlobalParameter(totalTopicCounter, t, t1) = broadcast.value
+        var dAS: BDV[Double] = null
+        var tT: (BDV[Double], BDV[Double]) = null
+
         iter.map {
           triplet =>
             val termId = triplet.srcId
@@ -323,31 +318,65 @@ object LDA {
             val termTopicCounter = triplet.srcAttr
             val docTopicCounter = triplet.dstAttr
             val topics = triplet.attr
-            var i = 0
-            while (i < topics.length) {
-              val currentTopic = topics(i)
-              val newTopic = if (rand.nextDouble() < 0.5) {
-                val p = wMap.getOrElseUpdate(termId, this.w(totalTopicCounter, t,
-                  termTopicCounter, numTerms, beta))
-                val w = p._1
-                val w1 = p._2
-                val proposalTopic = gibbsSamplerWord(rand, w, t, w1, t1, currentTopic)
-                metropolisHastingsSampler(rand, docTopicCounter, termTopicCounter,
-                  totalTopicCounter, beta, alpha, alphaAS, sumTerms, numTerms,
-                  currentTopic, proposalTopic, false)
-              } else {
-                val d = dMap.getOrElseUpdate(docId, this.d(docTopicCounter, alpha))
-                val proposalTopic = gibbsSamplerDoc(rand, d, alpha, currentTopic)
-                metropolisHastingsSampler(rand, docTopicCounter, termTopicCounter,
-                  totalTopicCounter, beta, alpha, alphaAS, sumTerms, numTerms,
-                  currentTopic, proposalTopic, true)
-              }
 
-              assert(newTopic < numTopics)
-              if (newTopic != currentTopic) {
-                topics(i) = newTopic
+            var maxSampleing = 8
+            while (maxSampleing > 0) {
+              maxSampleing -= 1
+              var i = 0
+              while (i < topics.length) {
+                val currentTopic = topics(i)
+                val docProposal = rand.nextDouble() < 0.5
+                val proposalTopic = if (docProposal) {
+                  if (dAS == null) dAS = this.dAS(totalTopicCounter, alpha, alphaAS, numTokens)
+                  val d = docTopicCounter.synchronized {
+                    dMap.getOrElseUpdate(docId, this.d(docTopicCounter, alpha))
+                  }
+                  gibbsSamplerDoc(rand, d, dAS, alpha, alphaAS, numTokens, currentTopic)
+                } else {
+                  if (tT == null) tT = LDA.t(totalTopicCounter, numTopics, beta)
+                  val (t, t1) = tT
+                  val (w, w1) = termTopicCounter.synchronized {
+                    wMap.getOrElseUpdate(termId, this.w(totalTopicCounter, t,
+                      termTopicCounter, numTerms, beta))
+                  }
+                  gibbsSamplerWord(rand, w, t, w1, t1, currentTopic)
+                }
+
+                val newTopic = docTopicCounter.synchronized {
+                  termTopicCounter.synchronized {
+                    metropolisHastingsSampler(rand, docTopicCounter, termTopicCounter,
+                      totalTopicCounter, beta, alpha, alphaAS, numTokens, numTerms,
+                      currentTopic, proposalTopic, docProposal)
+                  }
+                }
+
+                if (newTopic != currentTopic) {
+                  tT = null
+                  dAS = null
+                  dMap -= docId
+                  wMap -= termId
+                  totalTopicCounter(currentTopic) -= 1
+                  totalTopicCounter(newTopic) += 1
+
+                  docTopicCounter.synchronized {
+                    docTopicCounter(currentTopic) -= 1
+                    docTopicCounter(newTopic) += 1
+                    if (docTopicCounter(currentTopic) == 0) {
+                      docTopicCounter.compact()
+                    }
+                  }
+                  termTopicCounter.synchronized {
+                    termTopicCounter(currentTopic) -= 1
+                    termTopicCounter(newTopic) += 1
+                    if (termTopicCounter(currentTopic) == 0) {
+                      termTopicCounter.compact()
+                    }
+                  }
+
+                  topics(i) = newTopic
+                }
+                i += 1
               }
-              i += 1
             }
             topics
         }
@@ -430,7 +459,7 @@ object LDA {
       val topics = new Array[Int](tokens.length)
       var docTopicCounter = computedModel.uniformDistSampler(tokens, topics, gen)
       for (t <- 0 until 15) {
-        docTopicCounter = computedModel.generateTopicDistForDocument(docTopicCounter,
+        docTopicCounter = computedModel.sampleTokens(docTopicCounter,
           tokens, topics, gen)
       }
       doc.activeIterator.map { case (term, counter) =>
@@ -481,20 +510,22 @@ object LDA {
     val ntp = tokenTopicProb(docTopicCounter, termTopicCounter, totalTopicCounter,
       beta, alpha, alphaAS, numTokens, numTerms, newTopic, false)
     val cwp = if (docProposal) {
-      docTopicProb(docTopicCounter, currentTopic, alpha, true)
+      docTopicProb(docTopicCounter, totalTopicCounter, currentTopic,
+        alpha, alphaAS, numTokens, true)
     } else {
       wordTopicProb(termTopicCounter, totalTopicCounter, currentTopic,
         numTerms, beta, true)
     }
     val nwp = if (docProposal) {
-      docTopicProb(docTopicCounter, newTopic, alpha, false)
+      docTopicProb(docTopicCounter, totalTopicCounter, newTopic, alpha,
+        alphaAS, numTokens, false)
     } else {
       wordTopicProb(termTopicCounter, totalTopicCounter, newTopic,
         numTerms, beta, false)
     }
     val pi = (ntp * cwp) / (ctp * nwp)
 
-    if (rand.nextDouble() < 0.00001) {
+    if (rand.nextDouble() < 0.000001) {
       println(s"Pi: $docProposal ${pi}")
       println(s"($ntp * $cwp) / ($ctp * $nwp) ")
     }
@@ -547,33 +578,30 @@ object LDA {
     isAdjustment: Boolean): Double = {
     val termSum = beta * numTerms
     val count = termTopicCounter(topic)
-    if (isAdjustment) {
-      (count - 1D + beta) / (totalTopicCounter(topic) - 1D + termSum)
-    } else {
-      (count + beta) / (totalTopicCounter(topic) + termSum)
-    }
+    val adjustment = if (isAdjustment) -1.0 else 0.0
+    (count + adjustment + beta) / (totalTopicCounter(topic) + adjustment + termSum)
   }
 
   @inline private def docTopicProb(
     docTopicCounter: VD,
+    totalTopicCounter: BDV[Count],
     topic: Int,
     alpha: Double,
+    alphaR: Double,
+    numTokens: Double,
     isAdjustment: Boolean): Double = {
+    val numTopics = docTopicCounter.length
+    val termSum = numTokens - 1 + alphaR * numTopics
+    val alphaSum = alpha * numTopics
     if (isAdjustment) {
-      docTopicCounter(topic) + alpha - 1
+      val ratio = (totalTopicCounter(topic) - 1 + alphaR) / termSum
+      val as = ratio * alphaSum
+      docTopicCounter(topic) + as - 1
     } else {
-      docTopicCounter(topic) + alpha
+      val ratio = (totalTopicCounter(topic) + alphaR) / termSum
+      val as = ratio * alphaSum
+      docTopicCounter(topic) + as
     }
-  }
-
-  @inline private def indexW(
-    w: BSV[Double],
-    distSum: Double,
-    adjustment: Double,
-    currentTopic: Int): Int = {
-    val fun = (i: Int) => if (w.index(i) >= currentTopic) w.data(i) + adjustment else w.data(i)
-    val pos = binarySearchInterval(fun, distSum, 0, w.used, true)
-    pos
   }
 
   /**
@@ -636,19 +664,41 @@ object LDA {
   @inline private def gibbsSamplerDoc(
     rand: Random,
     d: BSV[Double],
+    dAS: BDV[Double],
     alpha: Double,
+    alphaR: Double,
+    numTokens: Double,
     currentTopic: Int): Int = {
     val numTopics = d.length
-    val adjustment = -1D
-    val lastSum = d.data(d.used - 1) + alpha * numTopics
+    val adjustment = -1D - alpha * numTopics / (numTokens - 1 + alphaR * numTopics)
+    val lastSum = d.data(d.used - 1) + dAS(numTopics - 1) + adjustment
     val distSum = rand.nextDouble() * lastSum
     val fun = (topic: Int) => {
       val lastSum = LDAUtils.binarySearchSparseVector(topic, d)
-      val tSum = alpha * (topic + 1)
+      val tSum = dAS(topic)
       if (topic >= currentTopic) lastSum + tSum + adjustment else lastSum + tSum
     }
     val topic = binarySearchInterval(fun, distSum, 0, numTopics, true)
     math.min(topic, numTopics - 1)
+  }
+
+  @inline private def dAS(
+    totalTopicCounter: BDV[Count],
+    alpha: Double,
+    alphaAS: Double,
+    numTokens: Double): BDV[Double] = {
+    val numTopics = totalTopicCounter.length
+    val asPrior = BDV.zeros[Double](numTopics)
+    val termSum = numTokens - 1 + alphaAS * numTopics
+    val alphaSum = alpha * numTopics
+    var lastSum = 0.0
+    for (topic <- 0 until numTopics) {
+      val ratio = (totalTopicCounter(topic) + alphaAS) / termSum
+      val lastA = ratio * alphaSum
+      lastSum += lastA
+      asPrior(topic) = lastSum
+    }
+    asPrior
   }
 
   @inline private def d(
@@ -787,8 +837,6 @@ class LDAKryoRegistrator extends KryoRegistrator {
 
     kryo.register(classOf[LDA.ED])
     kryo.register(classOf[LDA.VD])
-    kryo.register(classOf[LDA.Parameter])
-    kryo.register(classOf[LDA.GlobalParameter])
 
     kryo.register(classOf[Random])
     kryo.register(classOf[LDA])
