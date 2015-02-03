@@ -282,9 +282,7 @@ object LDA {
    * Asymmetric Dirichlet Priors you can refer to the paper:
    * "Rethinking LDA: Why Priors Matter", available at
    * [[http://people.ee.duke.edu/~lcarin/Eric3.5.2010.pdf]]
-   *
-   * if you want to know more about the above codes, you can refer to the following formula:
-   * First), the original Gibbis sampling formula is :
+   * the original Gibbis sampling formula is:
    * \frac{{n}_{kw}^{-di}+{\beta }_{w}}{{n}_{k}^{-di}+\bar{\beta}} \frac{{n}_{kd} ^{-di}+ \bar{\alpha} \frac{{n}_{k}^{-di} + \acute{\alpha}}{\sum{n}_{k} +\bar{\acute{\alpha}}}}{\sum{n}_{kd}^{-di} +\bar{\alpha}}
    */
   // scalastyle:on
@@ -299,33 +297,70 @@ object LDA {
     beta: Double,
     alphaAS: Double): Graph[VD, ED] = {
     val parts = graph.edges.partitions.size
+    val broadcastW = graph.edges.sparkContext.broadcast(
+      mutable.Map[VertexId, (BSV[Double], BSV[Double])]())
     graph.mapTriplets(
       (pid, iter) => {
         val gen = new XORShiftRandom(parts * innerIter + pid)
         val d = BDV.zeros[Double](numTopics)
         val d1 = BDV.zeros[Double](numTopics)
-        val wMap = mutable.Map[VertexId, (BSV[Double], BSV[Double])]()
-        val (t, t1) = LDA.t(totalTopicCounter, numTokens, numTerms,
-          numTopics, alpha, beta, alphaAS)
+        val wCache = broadcastW.value
+        var tT: (BDV[Double], BDV[Double]) = null
         iter.map {
           triplet =>
             val term = triplet.srcId
             val termTopicCounter = triplet.srcAttr
             val docTopicCounter = triplet.dstAttr
             val topics = triplet.attr
-            val p = wMap.getOrElseUpdate(term, this.w(totalTopicCounter, termTopicCounter,
-              numTokens, numTerms, numTopics, alpha, beta, alphaAS))
-            this.d(totalTopicCounter, termTopicCounter, docTopicCounter,
-              d, d1, numTokens, numTerms, numTopics, beta, alphaAS)
-            val w = p._1
-            val w1 = p._2
+            docTopicCounter.synchronized {
+              this.d(totalTopicCounter, termTopicCounter, docTopicCounter,
+                d, d1, numTokens, numTerms, numTopics, beta, alphaAS)
+            }
+            val (w, w1) = termTopicCounter.synchronized {
+              wCache.synchronized {
+                wCache.getOrElseUpdate(term, this.w(totalTopicCounter, termTopicCounter,
+                  numTokens, numTerms, numTopics, alpha, beta, alphaAS))
+              }
+            }
+
+            if (tT == null) tT = LDA.t(totalTopicCounter, numTokens, numTerms,
+              numTopics, alpha, beta, alphaAS)
+            val (t, t1) = tT
             var i = 0
             while (i < topics.length) {
               val currentTopic = topics(i)
               val adjustment = d1(currentTopic) + w1(currentTopic) + t1(currentTopic)
-              val newTopic = multinomialDistSampler(gen, docTopicCounter, d, w, t,
-                adjustment, currentTopic)
+              val newTopic = docTopicCounter.synchronized {
+                termTopicCounter.synchronized {
+                  multinomialDistSampler(gen, docTopicCounter, d, w, t,
+                    adjustment, currentTopic)
+                }
+              }
               assert(newTopic < numTopics)
+              if (currentTopic != newTopic) {
+                docTopicCounter.synchronized {
+                  docTopicCounter(currentTopic) -= 1
+                  docTopicCounter(newTopic) += 1
+                  if (docTopicCounter(currentTopic) == 0) {
+                    docTopicCounter.compact()
+                  }
+                }
+                termTopicCounter.synchronized {
+                  termTopicCounter(currentTopic) -= 1
+                  termTopicCounter(newTopic) += 1
+                  if (termTopicCounter(currentTopic) == 0) {
+                    termTopicCounter.compact()
+                  }
+                }
+
+                totalTopicCounter(currentTopic) -= 1
+                totalTopicCounter(newTopic) += 1
+
+                if (gen.nextDouble() < 0.001) {
+                  wCache -= term
+                  tT = null
+                }
+              }
               topics(i) = newTopic
               i += 1
             }
