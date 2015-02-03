@@ -353,8 +353,9 @@ object LDA {
                 totalTopicCounter(currentTopic) -= 1
                 totalTopicCounter(newTopic) += 1
 
-                if (gen.nextDouble() < 0.001) {
-                  wCache -= term
+                wCache -= term
+
+                if (gen.nextDouble() < 0.0001) {
                   tT = null
                 }
 
