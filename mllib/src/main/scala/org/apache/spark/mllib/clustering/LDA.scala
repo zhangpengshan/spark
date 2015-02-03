@@ -633,17 +633,20 @@ object LDAUtils {
     var mid: Int = (e + b) >> 1
     while (b <= e) {
       mid = (e + b) >> 1
-      if (ord.lt(index(mid), key)) {
+      val v = index(mid)
+      if (ord.lt(v, key)) {
         b = mid + 1
       }
-      else if (ord.gt(index(mid), key)) {
+      else if (ord.gt(v, key)) {
         e = mid - 1
       }
       else {
         return mid
       }
     }
-    mid = if ((greater && ord.gteq(index(mid), key)) || (!greater && ord.lteq(index(mid), key))) {
+
+    val v = index(mid)
+    mid = if ((greater && ord.gteq(v, key)) || (!greater && ord.lteq(v, key))) {
       mid
     }
     else if (greater) {
@@ -652,6 +655,7 @@ object LDAUtils {
     else {
       mid - 1
     }
+
     if (greater) {
       if (mid < end) assert(ord.gteq(index(mid), key))
       if (mid > 0) assert(ord.lteq(index(mid - 1), key))
