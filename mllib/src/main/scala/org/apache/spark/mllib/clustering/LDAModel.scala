@@ -108,7 +108,7 @@ class LDAModel private[mllib](
     rand: Random): BSV[Double] = {
     val docTopicCounter = BSV.zeros[Double](numTopics)
     for (i <- 0 until tokens.length) {
-      val topic = LDAUtils.uniformDistSampler(rand, numTopics)
+      val topic = LDAUtils.uniformSampler(rand, numTopics)
       topics(i) = topic
       docTopicCounter(topic) += 1D
     }
@@ -126,7 +126,7 @@ class LDAModel private[mllib](
   private[mllib] def uniformDistSampler(doc: BSV[Int], rand: Random): BSV[Double] = {
     val docTopicCounter = BSV.zeros[Double](numTopics)
     (0 until brzSum(doc)).foreach { i =>
-      val topic = LDAUtils.uniformDistSampler(rand, numTopics)
+      val topic = LDAUtils.uniformSampler(rand, numTopics)
       docTopicCounter(topic) += 1
     }
     docTopicCounter

@@ -298,15 +298,14 @@ object LDA {
     alphaAS: Double): Graph[VD, ED] = {
     val parts = graph.edges.partitions.size
     val broadcast = graph.edges.context.broadcast(
-      new mutable.HashMap[VertexId, (BSV[Double], BSV[Double])] with
-        mutable.SynchronizedMap[VertexId, (BSV[Double], BSV[Double])])
+      new mutable.HashMap[VertexId, BSV[Double]] with
+        mutable.SynchronizedMap[VertexId, BSV[Double]])
     graph.mapTriplets(
       (pid, iter) => {
         val gen = new XORShiftRandom(parts * innerIter + pid)
         val d = BDV.zeros[Double](numTopics)
-        val d1 = BDV.zeros[Double](numTopics)
         val wCache = broadcast.value
-        var tT: (BDV[Double], BDV[Double]) = null
+        var tCache: BDV[Double] = null
         iter.map {
           triplet =>
             val term = triplet.srcId
@@ -315,23 +314,22 @@ object LDA {
             val topics = triplet.attr
             docTopicCounter.synchronized {
               this.d(totalTopicCounter, termTopicCounter, docTopicCounter,
-                d, d1, numTokens, numTerms, numTopics, beta, alphaAS)
+                d, numTokens, numTerms, numTopics, beta, alphaAS)
             }
-            val (w, w1) = termTopicCounter.synchronized {
+            val w = termTopicCounter.synchronized {
               wCache.getOrElseUpdate(term, this.w(totalTopicCounter, termTopicCounter,
                 numTokens, numTerms, numTopics, alpha, beta, alphaAS))
             }
 
-            if (tT == null) tT = LDA.t(totalTopicCounter, numTokens, numTerms,
+            if (tCache == null) tCache = LDA.t(totalTopicCounter, numTokens, numTerms,
               numTopics, alpha, beta, alphaAS)
-            val (t, t1) = tT
+            val t = tCache
             var i = 0
             while (i < topics.length) {
               val currentTopic = topics(i)
-              val adjustment = d1(currentTopic) + w1(currentTopic) + t1(currentTopic)
               val newTopic = docTopicCounter.synchronized {
                 termTopicCounter.synchronized {
-                  multinomialDistSampler(gen, docTopicCounter, d, w, t, adjustment, currentTopic)
+                  multinomialDistSampler(gen, docTopicCounter, d, w, t)
                 }
               }
 
@@ -353,7 +351,7 @@ object LDA {
                 totalTopicCounter(newTopic) += 1
 
                 if (gen.nextDouble() < 0.01) wCache -= term
-                if (gen.nextDouble() < 0.0001) tT = null
+                if (gen.nextDouble() < 0.0001) tCache = null
 
                 topics(i) = newTopic
               }
@@ -430,7 +428,7 @@ object LDA {
     if (computedModel == null) {
       doc.activeIterator.map { case (term, counter) =>
         val ev = (0 until counter).map { i =>
-          uniformDistSampler(gen, numTopics)
+          uniformSampler(gen, numTopics)
         }.toArray
         Edge(term, newDocId, ev)
       }.toArray
@@ -455,18 +453,16 @@ object LDA {
   /**
    * A multinomial distribution sampler, using roulette method to sample an Int back.
    */
-  @inline private def multinomialDistSampler[V](
-    rand: Random,
+  @inline private def multinomialDistSampler(
+    gen: Random,
     docTopicCounter: BSV[Count],
     d: BDV[Double],
     w: BSV[Double],
-    t: BDV[Double],
-    adjustment: Double,
-    currentTopic: Int): Int = {
+    t: BDV[Double]): Int = {
     val numTopics = d.length
-    val lastSum = t(numTopics - 1) + w.data(w.used - 1) + d(numTopics - 1) + adjustment
-    val distSum = rand.nextDouble() * lastSum
-    val fun = index(docTopicCounter, d, w, t, adjustment, currentTopic) _
+    val lastSum = t(numTopics - 1) + w.data(w.used - 1) + d(numTopics - 1)
+    val distSum = gen.nextDouble() * lastSum
+    val fun = index(docTopicCounter, d, w, t) _
     val topic = binarySearchInterval(fun, distSum, 0, numTopics, true)
     math.min(topic, numTopics - 1)
   }
@@ -475,17 +471,11 @@ object LDA {
     docTopicCounter: BSV[Count],
     d: BDV[Double],
     w: BSV[Double],
-    t: BDV[Double],
-    adjustment: Double,
-    currentTopic: Int)(i: Int) = {
-    val lastDS = maxMinD(i, docTopicCounter, d)
+    t: BDV[Double])(i: Int) = {
+    val lastDS = binarySearchDenseVector(i, docTopicCounter, d)
     val lastWS = binarySearchSparseVector(i, w)
     val lastTS = t(i)
-    if (i >= currentTopic) {
-      lastDS + lastWS + lastTS + adjustment
-    } else {
-      lastDS + lastWS + lastTS
-    }
+    lastDS + lastWS + lastTS
   }
 
   @inline private def d(
@@ -493,7 +483,6 @@ object LDA {
     termTopicCounter: BSV[Count],
     docTopicCounter: BSV[Count],
     d: BDV[Double],
-    d1: BDV[Double],
     numTokens: Long,
     numTerms: Int,
     numTopics: Int,
@@ -513,14 +502,8 @@ object LDA {
       val count = data(i)
       val lastD = count * termSum * (termTopicCounter(topic) + beta) /
         ((totalTopicCounter(topic) + betaSum) * termSum)
-
-      val lastD1 = count * termSum * (termTopicCounter(topic) - 1D + beta) /
-        ((totalTopicCounter(topic) - 1D + betaSum) * termSum)
-
       lastSum += lastD
       d(topic) = lastSum
-      d1(topic) = lastD1 - lastD
-
       i += 1
     }
     d(numTopics - 1) = lastSum
@@ -534,19 +517,17 @@ object LDA {
     numTopics: Int,
     alpha: Double,
     beta: Double,
-    alphaAS: Double): (BSV[Double], BSV[Double]) = {
+    alphaAS: Double): BSV[Double] = {
     val alphaSum = alpha * numTopics
     val termSum = numTokens - 1D + alphaAS * numTopics
     val betaSum = numTerms * beta
-
     val length = termTopicCounter.length
     val used = termTopicCounter.used
     val index = termTopicCounter.index.slice(0, used)
     val data = termTopicCounter.data
     val w = new Array[Double](used)
-    val w1 = new Array[Double](used)
 
-    var lastsum = 0D
+    var lastSum = 0D
     var i = 0
 
     while (i < used) {
@@ -554,15 +535,11 @@ object LDA {
       val count = data(i)
       val lastW = count * alphaSum * (totalTopicCounter(topic) + alphaAS) /
         ((totalTopicCounter(topic) + betaSum) * termSum)
-      val lastW1 = count * (alphaSum * (totalTopicCounter(topic) - 1D + alphaAS) - termSum) /
-        ((totalTopicCounter(topic) - 1D + betaSum) * termSum)
-      lastsum += lastW
-      w(i) = lastsum
-      w1(i) = lastW1 - lastW
+      lastSum += lastW
+      w(i) = lastSum
       i += 1
     }
-    (new BSV[Double](index, w, used, length),
-      new BSV[Double](index, w1, used, length))
+    new BSV[Double](index, w, used, length)
   }
 
   private def t(
@@ -572,49 +549,30 @@ object LDA {
     numTopics: Int,
     alpha: Double,
     beta: Double,
-    alphaAS: Double): (BDV[Double], BDV[Double]) = {
+    alphaAS: Double): BDV[Double] = {
     val t = BDV.zeros[Double](numTopics)
-    val t1 = BDV.zeros[Double](numTopics)
-
     val alphaSum = alpha * numTopics
     val termSum = numTokens - 1D + alphaAS * numTopics
     val betaSum = numTerms * beta
+
     var lastSum = 0D
     for (topic <- 0 until numTopics) {
       val lastT = beta * alphaSum * (totalTopicCounter(topic) + alphaAS) /
         ((totalTopicCounter(topic) + betaSum) * termSum)
-
-      val lastT1 = (-1D + beta) * (alphaSum * (totalTopicCounter(topic) +
-        (-1D + alphaAS)) - termSum) / ((totalTopicCounter(topic) - 1D + betaSum) * termSum)
-
       lastSum += lastT
       t(topic) = lastSum
-      t1(topic) = lastT1 - lastT
     }
-    (t, t1)
+    t
   }
 }
 
 object LDAUtils {
 
-  /**
-   * A uniform distribution sampler, which is only used for initialization.
-   */
-  @inline private[mllib] def uniformDistSampler(rand: Random, dimension: Int): Int = {
+  private[mllib] def uniformSampler(rand: Random, dimension: Int): Int = {
     rand.nextInt(dimension)
   }
 
-
-  def binarySearchArray[K](
-    index: Array[K],
-    key: K,
-    begin: Int,
-    end: Int,
-    greater: Boolean)(implicit ord: Ordering[K], ctag: ClassTag[K]): Int = {
-    binarySearchInterval(i => index(i), key, begin, end, greater)
-  }
-
-  def binarySearchInterval[K](
+  private[mllib] def binarySearchInterval[K](
     index: Int => K,
     key: K,
     begin: Int,
@@ -662,33 +620,33 @@ object LDAUtils {
     mid
   }
 
-  @inline private[mllib] def binarySearchSparseVector(index: Int, w: BSV[Double]) = {
-    val pos = binarySearchArray(w.index, index, 0, w.used, false)
-    if (pos > -1) {
-      w.data(pos)
-    }
-    else {
-      0D
-    }
+  private[mllib] def binarySearchArray[K](
+    index: Array[K],
+    key: K,
+    begin: Int,
+    end: Int,
+    greater: Boolean)(implicit ord: Ordering[K], ctag: ClassTag[K]): Int = {
+    binarySearchInterval(i => index(i), key, begin, end, greater)
   }
 
-  @inline private[mllib] def maxMinD[V](
-    index: Int,
-    docTopicCounter: BSV[V],
-    d: BDV[Double]) = {
-    val pos = binarySearchArray(docTopicCounter.index, index, 0, docTopicCounter.used, false)
-    if (pos > -1) {
-      d(docTopicCounter.index(pos))
-    }
-    else {
-      0D
-    }
+  private[mllib] def binarySearchSparseVector(topic: Int, sv: BSV[Double]) = {
+    val index = sv.index
+    val used = sv.used
+    val data = sv.data
+    val pos = binarySearchArray(index, topic, 0, used, false)
+    if (pos > -1) data(pos) else 0D
   }
 
-
-  @inline private[mllib] def maxMinT(i: Int, t: BDV[Double]) = {
-    t(i)
+  private[mllib] def binarySearchDenseVector[V](
+    topic: Int,
+    sv: BSV[V],
+    dv: BDV[Double]): Double = {
+    val index = sv.index
+    val used = sv.used
+    val pos = binarySearchArray(index, topic, 0, used, false)
+    if (pos > -1) dv(index(pos)) else 0D
   }
+
 }
 
 class LDAKryoRegistrator extends KryoRegistrator {
