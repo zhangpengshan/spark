@@ -297,12 +297,15 @@ object LDA {
     beta: Double,
     alphaAS: Double): Graph[VD, ED] = {
     val parts = graph.edges.partitions.size
+    val broadcast = graph.edges.context.broadcast(
+      new mutable.HashMap[VertexId, (BSV[Double], BSV[Double])] with
+        mutable.SynchronizedMap[VertexId, (BSV[Double], BSV[Double])])
     graph.mapTriplets(
       (pid, iter) => {
         val gen = new XORShiftRandom(parts * innerIter + pid)
         val d = BDV.zeros[Double](numTopics)
         val d1 = BDV.zeros[Double](numTopics)
-        val wCache = mutable.Map[VertexId, (BSV[Double], BSV[Double])]()
+        val wCache = broadcast.value
         var tT: (BDV[Double], BDV[Double]) = null
         iter.map {
           triplet =>
@@ -333,31 +336,24 @@ object LDA {
               }
 
               if (currentTopic != newTopic) {
-
                 docTopicCounter.synchronized {
                   docTopicCounter(currentTopic) -= 1
                   docTopicCounter(newTopic) += 1
-                  if (docTopicCounter(currentTopic) == 0) {
-                    docTopicCounter.compact()
-                  }
+                  if (docTopicCounter(currentTopic) == 0) docTopicCounter.compact()
                 }
 
                 termTopicCounter.synchronized {
                   termTopicCounter(currentTopic) -= 1
                   termTopicCounter(newTopic) += 1
-                  if (termTopicCounter(currentTopic) == 0) {
-                    termTopicCounter.compact()
-                  }
+                  if (termTopicCounter(currentTopic) == 0) termTopicCounter.compact()
+
                 }
 
                 totalTopicCounter(currentTopic) -= 1
                 totalTopicCounter(newTopic) += 1
 
-                wCache -= term
-
-                if (gen.nextDouble() < 0.0001) {
-                  tT = null
-                }
+                if (gen.nextDouble() < 0.01) wCache -= term
+                if (gen.nextDouble() < 0.0001) tT = null
 
                 topics(i) = newTopic
               }
